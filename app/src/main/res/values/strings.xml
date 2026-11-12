@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">EscapeRoom</string>
-    <string name="choose_challenge">Elige un desafío</string>
+    <string name="choose_challenge">Elegí un desafío</string>
 
     <string name="challenge_1_title">Desafío 1</string>
     <string name="challenge_1_desc">Descripción corta del primer reto</string>
@@ -13,7 +13,7 @@
 
     <string name="challenge_3_title">Desafío 3</string>
     <string name="challenge_3_desc">Gestión de memoria</string>
-    <string name="challenge_3_intro">Gestiona la memoria del heap. En cada paso el sistema te indicará si debes PRODUCIR (reservar un bloque) o CONSUMIR (liberar un bloque). Completa las 15 operaciones antes de que se acabe el tiempo. Pierdes si desbordas la capacidad máxima o si intentas consumir con la memoria vacía. Al ganar se revelará un código que deberás ingresar para completar el desafío.</string>
+    <string name="challenge_3_intro">Gestiona la memoria del heap. En cada paso el sistema te indicará si debes PRODUCIR (reservar un bloque) o CONSUMIR (liberar un bloque). Completa las 15 operaciones antes de que se acabe el tiempo. Pierdes si desbordas la capacidad máxima o si intentas consumir con la memoria vacía. Al ganar se revelará un código que deberás ingresar y confirmar sacudiendo el teléfono.</string>
 
     <string name="back">Volver</string>
     <string name="start">Comenzar</string>
@@ -32,7 +32,8 @@
     <string name="btn_consume">CONSUMIR</string>
     <string name="request_produce">El sistema solicita: PRODUCIR</string>
     <string name="request_consume">El sistema solicita: CONSUMIR</string>
-    <string name="game_enter_code">¡Memoria gestionada! Ingresá el código para ganar.</string>
+    <string name="game_enter_code">¡Memoria gestionada! Ingresá el código.</string>
+    <string name="shake_to_confirm">Código completo. ¡Sacudí el teléfono para confirmar!</string>
 
     <string name="code_title">Código secreto</string>
     <string name="code_locked">• • • •</string>

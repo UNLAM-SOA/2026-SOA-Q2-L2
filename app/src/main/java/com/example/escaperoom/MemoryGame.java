@@ -142,6 +142,7 @@ public class MemoryGame {
         renderHeap();
 
         if (opsDone >= TOTAL_OPS) {
+            notifyProgress();
             finish(true, FAIL_NONE);
             return;
         }

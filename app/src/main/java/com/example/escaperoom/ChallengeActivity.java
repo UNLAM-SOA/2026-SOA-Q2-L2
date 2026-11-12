@@ -19,12 +19,13 @@ import androidx.core.content.ContextCompat;
 import java.util.Random;
 
 /**
- * Flujo de un desafío:
- *   explicación -> Comenzar -> (desafíos 1 y 2: esperando al ESP32 | desafío 3: minijuego) -> resultado
+ * Flujo de un desafio:
+ *   explicacion -> Comenzar -> (desafios 1 y 2: esperando al ESP32 | desafio 3: minijuego) -> resultado
  *
- * En el desafío 3, al ganar el minijuego se revela un código de 4 caracteres. El jugador
- * lo escribe en el campo de entrada y, al completar los 4 caracteres, se compara
- * automáticamente: si coincide, el desafío se da por ganado.
+ * En el desafio 3, al ganar el minijuego se revela un codigo de 4 caracteres. El jugador
+ * lo escribe en el campo de entrada y, al completar los 4 caracteres, debe SACUDIR el
+ * telefono. El acelerometro detecta la sacudida y recien ahi se compara el codigo:
+ * si coincide, el desafio se da por ganado.
  */
 public class ChallengeActivity extends AppCompatActivity implements EspClient.Listener {
 
@@ -44,8 +45,10 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     private int challenge;
     private EspClient esp;
     private MemoryGame game;
+    private ShakeDetector shakeDetector;
     private final Random codeRandom = new Random();
     private String winCode;
+    private boolean codeReady; // true cuando hay 4 caracteres escritos y falta sacudir
 
     private View panelIntro, panelWaiting, panelGame, panelResult;
     private View codeEntry;
@@ -83,15 +86,18 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         stylePrimaryButton((Button) findViewById(R.id.btnStart), color);
         stylePrimaryButton((Button) findViewById(R.id.btnRetry), color);
 
-        // Botones del minijuego de memoria (desafío 3).
+        // Botones del minijuego de memoria (desafio 3).
         btnProduce = findViewById(R.id.btnProduce);
         btnConsume = findViewById(R.id.btnConsume);
         stylePrimaryButton(btnProduce, ContextCompat.getColor(this, R.color.result_win));
         stylePrimaryButton(btnConsume, ContextCompat.getColor(this, R.color.piece_amber));
 
-        // TODO: reemplazar FakeEspClient por la implementación real (BLE / Wi-Fi)
+        // TODO: reemplazar FakeEspClient por la implementacion real (BLE / Wi-Fi)
         esp = new FakeEspClient();
         esp.setListener(this);
+
+        // Detector de sacudidas (acelerometro) para confirmar el codigo.
+        shakeDetector = new ShakeDetector(this, this::onShake);
 
         game = new MemoryGame((LinearLayout) findViewById(R.id.heapContainer), new MemoryGame.Callback() {
             @Override
@@ -114,11 +120,12 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
             }
         });
 
-        // Compara el código automáticamente a medida que se escribe.
+        // Al escribir, solo marcamos si el codigo esta completo; la comparacion
+        // se hace recien cuando el jugador sacude el telefono.
         codeInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
             @Override public void onTextChanged(CharSequence s, int st, int b, int c) { }
-            @Override public void afterTextChanged(Editable s) { checkCode(s.toString()); }
+            @Override public void afterTextChanged(Editable s) { onCodeChanged(s.toString()); }
         });
 
         btnProduce.setOnClickListener(v -> game.produce());
@@ -147,7 +154,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         }
     }
 
-    // ---- Respuestas del ESP32 (desafíos 1 y 2) ----
+    // ---- Respuestas del ESP32 (desafios 1 y 2) ----
 
     @Override
     public void onResult(boolean success) {
@@ -159,11 +166,13 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         showResult(false, R.string.error_message);
     }
 
-    // ---- Código secreto del desafío 3 ----
+    // ---- Codigo secreto del desafio 3 ----
 
-    /** Deja el minijuego en su estado inicial (caja bloqueada, sin entrada de código). */
+    /** Deja el minijuego en su estado inicial (caja bloqueada, sin entrada de codigo). */
     private void resetGameUi() {
         winCode = null;
+        codeReady = false;
+        shakeDetector.stop();
         codeReveal.setText(R.string.code_locked);
         codeEntry.setVisibility(View.GONE);
         codeError.setVisibility(View.GONE);
@@ -172,9 +181,10 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         btnConsume.setEnabled(true);
     }
 
-    /** Se ganó el minijuego: genera y muestra el código, y habilita la entrada. */
+    /** Se gano el minijuego: genera y muestra el codigo, y habilita la entrada. */
     private void revealCode() {
         winCode = generateCode();
+        codeReady = false;
         codeReveal.setText(winCode);
         requestLabel.setText(R.string.game_enter_code);
         btnProduce.setEnabled(false);
@@ -185,15 +195,43 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         codeInput.requestFocus();
     }
 
-    /** Se llama en cada cambio del campo: compara automáticamente al completar los 4 caracteres. */
-    private void checkCode(String entered) {
+    /**
+     * Cada cambio del campo: al completar los 4 caracteres pide la sacudida.
+     * Si el dispositivo no tiene acelerometro, valida directamente (respaldo).
+     */
+    private void onCodeChanged(String entered) {
         if (winCode == null) return;
-        entered = entered.trim();
-        if (entered.length() < CODE_LENGTH) {
-            codeError.setVisibility(View.GONE);
+        codeError.setVisibility(View.GONE);
+
+        if (entered.trim().length() < CODE_LENGTH) {
+            codeReady = false;
+            shakeDetector.stop();
+            requestLabel.setText(R.string.game_enter_code);
             return;
         }
+
+        codeReady = true;
+        if (shakeDetector.isAvailable()) {
+            requestLabel.setText(R.string.shake_to_confirm);
+            shakeDetector.start();
+        } else {
+            // Sin acelerometro: no hay forma de sacudir, validamos de una.
+            verifyCode();
+        }
+    }
+
+    /** Disparado por el acelerometro cuando se detecta una sacudida. */
+    private void onShake() {
+        if (!codeReady || winCode == null) return;
+        verifyCode();
+    }
+
+    /** Compara el codigo ingresado con el generado. */
+    private void verifyCode() {
+        String entered = codeInput.getText().toString().trim();
         if (entered.equalsIgnoreCase(winCode)) {
+            codeReady = false;
+            shakeDetector.stop();
             showResult(true, getString(R.string.win_memory));
         } else {
             codeError.setVisibility(View.VISIBLE);
@@ -235,7 +273,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         showPanel(panelResult);
     }
 
-    /** Botón principal con el color indicado y esquinas redondeadas. */
+    /** Boton principal con el color indicado y esquinas redondeadas. */
     private void stylePrimaryButton(Button button, int color) {
         GradientDrawable fill = new GradientDrawable();
         fill.setColor(color);
@@ -251,9 +289,26 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // No escuchar el sensor mientras la pantalla no esta en primer plano.
+        shakeDetector.stop();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Si quedo un codigo completo pendiente de confirmar, reactivamos el sensor.
+        if (codeReady && shakeDetector.isAvailable()) {
+            shakeDetector.start();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         esp.cancel();
         game.stop();
+        shakeDetector.stop();
     }
 }
