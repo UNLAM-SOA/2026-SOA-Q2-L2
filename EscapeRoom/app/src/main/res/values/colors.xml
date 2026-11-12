@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#101B33</color>
+    <color name="board">#1A2747</color>
+    <color name="board_line">#2E3F6B</color>
+    <color name="ripple">#33FFFFFF</color>
+    <color name="text_primary">#EEF1FA</color>
+    <color name="text_muted">#8E9AB8</color>
+    <color name="piece_amber">#F5B841</color>
+    <color name="challenge_1">#E8710A</color>
+    <color name="challenge_2">#1FA37A</color>
+    <color name="challenge_3">#5B6CF0</color>
+    <color name="result_win">#4FD1A5</color>
+    <color name="result_lose">#FF7A7A</color>
+</resources>

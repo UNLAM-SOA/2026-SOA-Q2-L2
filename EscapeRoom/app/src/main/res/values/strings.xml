@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">EscapeRoom</string>
+    <string name="choose_challenge">Elige un desafío</string>
+
+    <string name="challenge_1_title">Desafío 1</string>
+    <string name="challenge_1_desc">Descripción corta del primer reto</string>
+    <string name="challenge_1_intro">Aquí va la explicación del desafío 1. Al tocar Comenzar, el desafío arranca en el dispositivo y la app espera el resultado.</string>
+
+    <string name="challenge_2_title">Desafío 2</string>
+    <string name="challenge_2_desc">Descripción corta del segundo reto</string>
+    <string name="challenge_2_intro">Aquí va la explicación del desafío 2. Al tocar Comenzar, el desafío arranca en el dispositivo y la app espera el resultado.</string>
+
+    <string name="challenge_3_title">Desafío 3</string>
+    <string name="challenge_3_desc">Gestión de memoria</string>
+    <string name="challenge_3_intro">Gestiona la memoria del heap. En cada paso el sistema te indicará si debes PRODUCIR (reservar un bloque) o CONSUMIR (liberar un bloque). Completa las 15 operaciones antes de que se acabe el tiempo. Pierdes si desbordas la capacidad máxima o si intentas consumir con la memoria vacía. Al ganar se revelará un código que deberás ingresar para completar el desafío.</string>
+
+    <string name="back">Volver</string>
+    <string name="start">Comenzar</string>
+    <string name="cancel">Cancelar</string>
+    <string name="retry">Reintentar</string>
+    <string name="back_to_menu">Volver al menú</string>
+
+    <string name="waiting_title">Esperando al dispositivo…</string>
+    <string name="waiting_hint">Completa el desafío en el dispositivo.</string>
+
+    <string name="game_ops">Operaciones: %1$d/%2$d</string>
+    <string name="game_heap">Memoria: %1$d / %2$d bloques</string>
+    <string name="game_time">Tiempo: %1$d s</string>
+
+    <string name="btn_produce">PRODUCIR</string>
+    <string name="btn_consume">CONSUMIR</string>
+    <string name="request_produce">El sistema solicita: PRODUCIR</string>
+    <string name="request_consume">El sistema solicita: CONSUMIR</string>
+    <string name="game_enter_code">¡Memoria gestionada! Ingresá el código para ganar.</string>
+
+    <string name="code_title">Código secreto</string>
+    <string name="code_locked">• • • •</string>
+    <string name="code_hint">Ingresá el código</string>
+    <string name="validate">Validar</string>
+    <string name="code_wrong">Código incorrecto. Revisá e intentá de nuevo.</string>
+
+    <string name="win_title">¡Ganaste!</string>
+    <string name="win_message">¡Completaste el desafío!</string>
+    <string name="win_memory">Código correcto. ¡Desafío completado!</string>
+    <string name="lose_title">Fallaste</string>
+    <string name="lose_message">No lo lograste esta vez. Puedes intentarlo de nuevo.</string>
+    <string name="error_message">No se pudo conectar con el dispositivo. Revisa la conexión e inténtalo de nuevo.</string>
+
+    <string name="fail_overflow">¡Desbordamiento! Intentaste producir con la memoria llena.</string>
+    <string name="fail_underflow">¡Subdesbordamiento! Intentaste consumir con la memoria vacía.</string>
+    <string name="fail_wrong">Operación incorrecta: no seguiste la solicitud del sistema.</string>
+    <string name="fail_timeout">Se acabó el tiempo antes de completar las operaciones.</string>
+</resources>
