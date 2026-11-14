@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Escape Room SOA</string>
+    <string name="choose_challenge">Elegí un desafío</string>
+
+    <string name="challenge_1_title">Desafío 1</string>
+    <string name="challenge_1_desc">Patrón acústico</string>
+    <string name="challenge_1_intro">Observá el LED amarillo del ESP32, que va a parpadear. Pista: la clave no se ve; se escucha.</string>
+
+    <string name="challenge_2_title">Desafío 2</string>
+    <string name="challenge_2_desc">Calibración analógica</string>
+    <string name="challenge_2_intro">Ajustá el potenciómetro en el ESP32 para alcanzar la tensión objetivo utilizando la Ley de Ohm. Dejá el valor quieto 3 segundos para confirmar.</string>
+
+    <string name="challenge_3_title">Desafío 3</string>
+    <string name="challenge_3_desc">Gestión de memoria</string>
+    <string name="challenge_3_intro">Gestioná la memoria del heap. En cada paso, se te indicará si debés PRODUCIR (reservar un bloque) o CONSUMIR (liberar un bloque). Completá las operaciones antes de que se acabe el tiempo. Si desbordás la capacidad máxima o si intentás consumir con la memoria vacía, perdés. Al ganar se va a revelar un código que vas a tener que ingresar y luego confirmar sacudiendo el teléfono.</string>
+
+    <string name="back">Volver</string>
+    <string name="start">Comenzar</string>
+    <string name="cancel">Cancelar</string>
+    <string name="retry">Reintentar</string>
+    <string name="back_to_menu">Volver al menú</string>
+
+    <string name="waiting_title">Esperando al dispositivo…</string>
+    <string name="waiting_hint">Completá el desafío en el dispositivo.</string>
+
+    <string name="game_ops">Operaciones: %1$d/%2$d</string>
+    <string name="game_heap">Memoria: %1$d / %2$d bloques</string>
+    <string name="game_time">Tiempo: %1$d s</string>
+
+    <string name="btn_produce">PRODUCIR</string>
+    <string name="btn_consume">CONSUMIR</string>
+    <string name="request_produce">El sistema solicita: PRODUCIR</string>
+    <string name="request_consume">El sistema solicita: CONSUMIR</string>
+    <string name="game_enter_code">¡Memoria gestionada! Ingresá el código.</string>
+    <string name="shake_to_confirm">Código completo. ¡Sacudí el teléfono para confirmar!</string>
+
+    <string name="code_title">Código secreto</string>
+    <string name="code_locked">• • • •</string>
+    <string name="code_hint">Ingresá el código</string>
+    <string name="validate">Validar</string>
+    <string name="code_wrong">Código incorrecto. Revisá e intentá de nuevo.</string>
+
+    <string name="win_title">¡Ganaste!</string>
+    <string name="win_message">¡Completaste el desafío!</string>
+    <string name="win_memory">Código correcto. ¡Desafío completado!</string>
+    <string name="lose_title">Fallaste</string>
+    <string name="lose_message">No lo lograste esta vez. Podés intentarlo de nuevo.</string>
+    <string name="error_message">No se pudo conectar con el dispositivo. Revisá la conexión e intentalo de vuelta.</string>
+
+    <string name="fail_overflow">¡Desbordamiento! Intentaste producir con la memoria llena.</string>
+    <string name="fail_underflow">¡Subdesbordamiento! Intentaste consumir con la memoria vacía.</string>
+    <string name="fail_wrong">Operación incorrecta: no seguiste la solicitud del sistema.</string>
+    <string name="fail_timeout">Se acabó el tiempo antes de completar las operaciones.</string>
+</resources>

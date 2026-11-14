@@ -1,0 +1,1028 @@
+// ============================================================================
+// Sistema de Desafíos Interactivos (Escape Room) — Versión Wokwi (sketch.ino)
+//
+// Integra la arquitectura oficial FSM + FreeRTOS (rúbrica de cátedra):
+//  - Timers de software de FreeRTOS (sin millis() para timeouts).
+//  - tarea_fsm en cola_eventos con vTaskDelete(NULL) en loop() (sin delay()).
+//  - Máquina de estados con doble switch y nombres de eventos del diagrama.
+//  - Productor-consumidor desacoplado mediante colas FreeRTOS.
+//  - Integración completa MQTT (broker.hivemq.com:1883) con App Android:
+//      Subscripción: soa/escape/seleccion ("1", "2", "3"), soa/escape/d3 ("OK", "ERROR")
+//      Publicación:  soa/escape/pot (%.2f), soa/escape/desafio (N,OK / N,ERROR),
+//                    soa/escape/vidas (%d), soa/escape/estado (BLOQUEADO / VICTORIA)
+//  - Compatibilidad total con pantalla LiquidCrystal_I2C (0x27) y red Wokwi-GUEST.
+// ============================================================================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <LiquidCrystal_I2C.h>
+#include <ESP32Servo.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+#include <freertos/timers.h>
+
+// ============================================================================
+// CONFIGURACIÓN DE PINES
+// ============================================================================
+// Descomenta la siguiente línea si tu circuito de Wokwi tiene el LCD en 25/33 y servo en 32:
+// #define USAR_PINES_WOKWI_LEGACY
+
+#ifdef USAR_PINES_WOKWI_LEGACY
+  const uint8_t PIN_LCD_SDA      = 25;
+  const uint8_t PIN_LCD_SCL      = 33;
+  const uint8_t PIN_SERVO        = 32;
+  const int SERVO_ANGULO_CERRADO = 0;
+  const int SERVO_ANGULO_ABIERTO = 90;
+#else
+  const uint8_t PIN_LCD_SDA      = 21;
+  const uint8_t PIN_LCD_SCL      = 22;
+  const uint8_t PIN_SERVO        = 27;
+  const int SERVO_ANGULO_CERRADO = 15;
+  const int SERVO_ANGULO_ABIERTO = 90;
+#endif
+
+const uint8_t PIN_BUZZER       = 14;
+const uint8_t PIN_POT_MIC      = 34; // ADC1_CH6
+const uint8_t PIN_POT_OHM      = 35; // ADC1_CH7
+const uint8_t PIN_LED_PROG1    = 2;
+const uint8_t PIN_LED_PROG2    = 4;
+const uint8_t PIN_LED_PROG3    = 5;
+const uint8_t PIN_LED_AMARILLO = 18;
+const uint8_t PIN_BTN_RESET    = 23;
+
+const int LCD_COLUMNAS = 16;
+const int LCD_FILAS    = 2;
+
+const int SERVO_FRECUENCIA_HZ  = 50;
+const int SERVO_MIN_PULSO_US   = 500;
+const int SERVO_MAX_PULSO_US   = 2400;
+
+// ============================================================================
+// CONSTANTES Y PARÁMETROS DEL JUEGO
+// ============================================================================
+const bool DEBUG_ACTIVO = true;
+
+const int MAX_VIDAS      = 3;
+const int TOTAL_DESAFIOS = 3;
+
+// Desafío 1: Ritmo acústico
+const int D1_APLAUSOS_OBJETIVO = 3;
+const int D1_PRIMER_APLAUSO    = 1;
+const int UMBRAL_SONIDO_ALTO   = 2000;
+const int UMBRAL_SONIDO_BAJO   = 1400;
+const unsigned long TIEMPO_VENTANA_D1   = 5000;
+const unsigned long DEBOUNCE_APLAUSO_MS = 200;
+const unsigned long SEMIPERIODO_MAX_MS  = 300;
+const unsigned long SEMIPERIODO_MIN_MS  = 60;
+
+// Desafío 2: Ley de Ohm (100 Ohm * 20 mA = 2.00 V)
+const int R_OHM_VALOR          = 100;
+const int I_CORRIENTE_MA       = 20;
+const int V_OBJETIVO_MV        = R_OHM_VALOR * I_CORRIENTE_MA; // 2000 mV
+const int TOLERANCIA_MV        = 150;                          // +-0.15 V
+const int UMBRAL_RUIDO_ADC     = 40;
+const unsigned long TIEMPO_INACTIVIDAD_D2 = 3000;
+const int ADC_MAXIMO           = 4095;
+const int ADC_MILIVOLTS_MAXIMO = 3300;
+const float MILIVOLTS_POR_VOLT = 1000.0f;
+
+// Tiempos de estados
+const unsigned long TIEMPO_LIMITE_DESAFIO    = 60000;  // D1 y D2
+const unsigned long TIEMPO_LIMITE_D3         = 120000; // D3 (minijuego Android)
+const unsigned long TIEMPO_MOSTRAR_RESULTADO = 1500;
+const unsigned long TIEMPO_PENALIZACION      = 60000;
+const unsigned long TIEMPO_RESETEANDO        = 3000;
+const unsigned long DEBOUNCE_BTN_MS          = 50;
+const unsigned long MS_POR_SEGUNDO           = 1000;
+
+// Buzzer
+const unsigned int  FREC_BEEP     = 2000;
+const unsigned long DUR_BEEP      = 100;
+const unsigned int  FREC_ACIERTO1 = 1500;
+const unsigned long DUR_ACIERTO1  = 150;
+const unsigned int  FREC_ACIERTO2 = 2500;
+const unsigned long DUR_ACIERTO2  = 300;
+const unsigned int  FREC_ERROR    = 400;
+const unsigned long DUR_ERROR     = 400;
+
+// Red Wokwi y MQTT
+const char *const WIFI_SSID          = "Wokwi-GUEST";
+const char *const WIFI_PASS          = "";
+const char *const MQTT_BROKER        = "broker.hivemq.com";
+const uint16_t    MQTT_PORT          = 1883;
+
+const char *const TOPICO_SEL_DESAFIO = "soa/escape/seleccion";
+const char *const TOPICO_D3_CODIGO   = "soa/escape/d3";
+const char *const TOPICO_TX_POT      = "soa/escape/pot";
+const char *const TOPICO_TX_DESAFIO  = "soa/escape/desafio";
+const char *const TOPICO_TX_ESTADO   = "soa/escape/estado";
+const char *const TOPICO_TX_VIDAS    = "soa/escape/vidas";
+
+const size_t TAM_TOPICO       = 32;
+const size_t TAM_PAYLOAD      = 16;
+const size_t TAM_BUFFER_TEXTO = 32;
+
+// ============================================================================
+// CONFIGURACIÓN DE TAREAS Y COLAS FREERTOS
+// ============================================================================
+const uint32_t TAM_PILA_FSM     = 1024 * 4;
+const uint32_t TAM_PILA_EVENTOS = 1024 * 2;
+const uint32_t TAM_PILA_LED     = 1024 * 2;
+const uint32_t TAM_PILA_BUZZER  = 1024 * 2;
+const uint32_t TAM_PILA_LCD     = 1024 * 3;
+const uint32_t TAM_PILA_COM     = 1024 * 3;
+const uint32_t TAM_PILA_MQTT    = 1024 * 8; // 8192 bytes para evitar stack overflow en Wokwi
+
+const UBaseType_t PRIORIDAD_FSM     = 3;
+const UBaseType_t PRIORIDAD_EVENTOS = 2;
+const UBaseType_t PRIORIDAD_LED     = 1;
+const UBaseType_t PRIORIDAD_BUZZER  = 2;
+const UBaseType_t PRIORIDAD_LCD     = 1;
+const UBaseType_t PRIORIDAD_COM     = 2;
+const UBaseType_t PRIORIDAD_MQTT    = 2;
+
+const unsigned long TMP_EVENTOS_MILI = 5;
+const TickType_t    SIN_ESPERA       = 0;
+
+// ============================================================================
+// TIPOS DE DATOS: ESTADOS Y EVENTOS (FSM PURA)
+// ============================================================================
+typedef enum {
+    ESTADO_ESPERANDO_DESAFIO,
+    ESTADO_D1_ESPERANDO_APLAUSO,
+    ESTADO_D2_ESPERANDO_CAMBIO_POT,
+    ESTADO_D3_ESPERANDO_CODIGO,
+    ESTADO_DESAFIO_FINALIZADO,
+    ESTADO_PENALIZACION_BLOQUEADO,
+    ESTADO_CAJA_DESBLOQUEADA,
+    ESTADO_RESETEANDO,
+    CANT_ESTADOS
+} estado_fsm_t;
+
+typedef enum {
+    EVENTO_CONTINUE,
+    EVENTO_DESAFIO_1,
+    EVENTO_DESAFIO_2,
+    EVENTO_DESAFIO_3,
+    EVENTO_APLAUSO_DETECTADO,
+    EVENTO_D1_CANT_APLAUSOS_ALCANZADA,
+    EVENTO_VALOR_POT_CAMBIO,
+    EVENTO_D2_VALOR_POT_CORRECTO,
+    EVENTO_D3_CODIGO_OK,
+    EVENTO_D3_CODIGO_ERROR,
+    EVENTO_TIMEOUT_DESAFIO,
+    EVENTO_CON_VIDAS,
+    EVENTO_SIN_VIDAS,
+    EVENTO_DESAFIOS_COMPLETADOS,
+    EVENTO_TIMEOUT_FIN_PENALIZACION,
+    EVENTO_BTN_RESET,
+    EVENTO_FIN_RESET,
+    CANT_EVENTOS
+} tipo_evento_t;
+
+typedef struct {
+    tipo_evento_t tipo;
+    int valor_aux;
+} evento_t;
+
+typedef enum {
+    SONIDO_BEEP,
+    SONIDO_ACIERTO,
+    SONIDO_ERROR
+} tipo_sonido_t;
+
+typedef struct {
+    char linea1[LCD_COLUMNAS + 1];
+    char linea2[LCD_COLUMNAS + 1];
+    int cuenta_regresiva;
+} msg_lcd_t;
+
+typedef enum {
+    LED_CMD_APAGAR,
+    LED_CMD_FIJO,
+    LED_CMD_RITMO
+} modo_led_t;
+
+typedef struct {
+    modo_led_t modo;
+    unsigned long semiperiodo_ms;
+} cmd_led_amarillo_t;
+
+typedef struct {
+    char topico[TAM_TOPICO];
+    char payload[TAM_PAYLOAD];
+} msg_mqtt_tx_t;
+
+// Colas
+QueueHandle_t cola_eventos = NULL;
+QueueHandle_t cola_buzzer  = NULL;
+QueueHandle_t cola_lcd     = NULL;
+QueueHandle_t cola_led     = NULL;
+QueueHandle_t cola_mqtt_tx = NULL;
+
+SemaphoreHandle_t mutex_serial = NULL;
+
+#define LOG_DEBUG(...)                                  \
+    do {                                                \
+        if (DEBUG_ACTIVO) {                             \
+            if (mutex_serial) xSemaphoreTake(mutex_serial, portMAX_DELAY);\
+            Serial.printf(__VA_ARGS__);                 \
+            if (mutex_serial) xSemaphoreGive(mutex_serial);\
+        }                                               \
+    } while (0)
+
+void encolar_evento(tipo_evento_t tipo, int valor_aux) {
+    evento_t ev = { tipo, valor_aux };
+    xQueueSend(cola_eventos, &ev, SIN_ESPERA);
+}
+
+// ============================================================================
+// VARIABLES GLOBALES DEL JUEGO
+// ============================================================================
+estado_fsm_t estado_actual;
+int vidas = MAX_VIDAS;
+bool desafio_resuelto[TOTAL_DESAFIOS + 1];
+int total_resueltos = 0;
+
+LiquidCrystal_I2C lcd(0x27, LCD_COLUMNAS, LCD_FILAS);
+Servo servo_traba;
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+
+const uint8_t PINES_LED_PROG[TOTAL_DESAFIOS + 1] = { 0, PIN_LED_PROG1, PIN_LED_PROG2, PIN_LED_PROG3 };
+
+const char *const NOMBRE_ESTADO[CANT_ESTADOS] = {
+    "ESPERANDO_DESAFIO", "D1_ESPERANDO_APLAUSO", "D2_ESPERANDO_CAMBIO_POT",
+    "D3_ESPERANDO_CODIGO", "DESAFIO_FINALIZADO", "PENALIZACION_BLOQUEADO",
+    "CAJA_DESBLOQUEADA", "RESETEANDO"
+};
+
+const char *const NOMBRE_EVENTO[CANT_EVENTOS] = {
+    "CONTINUE", "DESAFIO_1", "DESAFIO_2", "DESAFIO_3", "APLAUSO_DETECTADO",
+    "D1_CANT_APLAUSOS_ALCANZADA", "VALOR_POT_CAMBIO", "D2_VALOR_POT_CORRECTO",
+    "D3_CODIGO_OK", "D3_CODIGO_ERROR", "TIMEOUT_DESAFIO", "CON_VIDAS", "SIN_VIDAS",
+    "DESAFIOS_COMPLETADOS", "TIMEOUT_FIN_PENALIZACION", "BTN_RESET", "FIN_RESET"
+};
+
+// ============================================================================
+// TIMERS FREERTOS (REEMPLAZO DE MILLIS)
+// ============================================================================
+TimerHandle_t timer_timeout = NULL;
+TimerHandle_t timer_estado  = NULL;
+
+void callback_timeout(TimerHandle_t timer) {
+    encolar_evento(EVENTO_TIMEOUT_DESAFIO, 0);
+}
+
+void callback_estado(TimerHandle_t timer) {
+    encolar_evento((tipo_evento_t)(intptr_t)pvTimerGetTimerID(timer), 0);
+}
+
+void crear_timers() {
+    timer_timeout = xTimerCreate("timer_timeout", pdMS_TO_TICKS(TIEMPO_LIMITE_DESAFIO), pdFALSE, NULL, callback_timeout);
+    timer_estado  = xTimerCreate("timer_estado", pdMS_TO_TICKS(TIEMPO_RESETEANDO), pdFALSE, NULL, callback_estado);
+}
+
+void iniciar_timeout(unsigned long duracion_ms) {
+    xTimerChangePeriod(timer_timeout, pdMS_TO_TICKS(duracion_ms), SIN_ESPERA);
+}
+
+void detener_timeout() {
+    xTimerStop(timer_timeout, SIN_ESPERA);
+}
+
+void programar_evento(tipo_evento_t evento, unsigned long duracion_ms) {
+    vTimerSetTimerID(timer_estado, (void *)(intptr_t)evento);
+    xTimerChangePeriod(timer_estado, pdMS_TO_TICKS(duracion_ms), SIN_ESPERA);
+}
+
+void detener_timers() {
+    xTimerStop(timer_timeout, SIN_ESPERA);
+    xTimerStop(timer_estado, SIN_ESPERA);
+}
+
+// ============================================================================
+// SENSORES (DESACOPLADOS DE LA FSM)
+// ============================================================================
+int aplausos_contados = 0;
+unsigned long t_primer_aplauso = 0;
+unsigned long t_ultimo_aplauso = 0;
+bool mic_armado = true;
+
+int adc_pot_ultimo = 0;
+unsigned long t_ultimo_mov_pot = 0;
+bool pot_empezo_a_mover = false;
+
+int btn_reset_anterior = HIGH;
+unsigned long t_ultimo_cambio_btn = 0;
+
+unsigned long ahora_ms() {
+    return xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+int adc_a_milivolts(int lectura_adc) {
+    return (lectura_adc * ADC_MILIVOLTS_MAXIMO) / ADC_MAXIMO;
+}
+
+void inicializar_sensores() {
+    pinMode(PIN_POT_MIC, INPUT);
+    pinMode(PIN_POT_OHM, INPUT);
+    pinMode(PIN_BTN_RESET, INPUT_PULLUP);
+    adc_pot_ultimo = analogRead(PIN_POT_OHM);
+    btn_reset_anterior = digitalRead(PIN_BTN_RESET);
+}
+
+bool verificar_boton_reset(evento_t &ev) {
+    int btn_lectura = digitalRead(PIN_BTN_RESET);
+    unsigned long ahora = ahora_ms();
+    if (btn_lectura == btn_reset_anterior || ahora - t_ultimo_cambio_btn <= DEBOUNCE_BTN_MS) {
+        return false;
+    }
+    t_ultimo_cambio_btn = ahora;
+    btn_reset_anterior = btn_lectura;
+    ev = { EVENTO_BTN_RESET, 0 };
+    return btn_lectura == LOW;
+}
+
+bool verificar_microfono(evento_t &ev) {
+    int adc_mic = analogRead(PIN_POT_MIC);
+    unsigned long ahora = ahora_ms();
+    if (!mic_armado) {
+        mic_armado = (adc_mic < UMBRAL_SONIDO_BAJO);
+        return false;
+    }
+    if (adc_mic <= UMBRAL_SONIDO_ALTO || ahora - t_ultimo_aplauso <= DEBOUNCE_APLAUSO_MS) {
+        return false;
+    }
+    mic_armado = false;
+    t_ultimo_aplauso = ahora;
+    if (aplausos_contados == 0 || ahora - t_primer_aplauso > TIEMPO_VENTANA_D1) {
+        aplausos_contados = 0;
+        t_primer_aplauso = ahora;
+    }
+    aplausos_contados++;
+    bool alcanzado = (aplausos_contados >= D1_APLAUSOS_OBJETIVO);
+    ev = { alcanzado ? EVENTO_D1_CANT_APLAUSOS_ALCANZADA : EVENTO_APLAUSO_DETECTADO, aplausos_contados };
+    if (alcanzado) {
+        aplausos_contados = 0;
+    }
+    return true;
+}
+
+bool verificar_potenciometro(evento_t &ev) {
+    int adc_pot = analogRead(PIN_POT_OHM);
+    unsigned long ahora = ahora_ms();
+    if (abs(adc_pot - adc_pot_ultimo) > UMBRAL_RUIDO_ADC) {
+        adc_pot_ultimo = adc_pot;
+        t_ultimo_mov_pot = ahora;
+        pot_empezo_a_mover = true;
+        ev = { EVENTO_VALOR_POT_CAMBIO, adc_a_milivolts(adc_pot) };
+        return true;
+    }
+    if (!pot_empezo_a_mover || ahora - t_ultimo_mov_pot < TIEMPO_INACTIVIDAD_D2) {
+        return false;
+    }
+    pot_empezo_a_mover = false;
+    int milivolts = adc_a_milivolts(adc_pot_ultimo);
+    ev = { EVENTO_D2_VALOR_POT_CORRECTO, milivolts };
+    return abs(milivolts - V_OBJETIVO_MV) <= TOLERANCIA_MV;
+}
+
+typedef bool (*sensor_fn)(evento_t &);
+const sensor_fn VERIFICAR_SENSOR[] = {
+    verificar_boton_reset,
+    verificar_microfono,
+    verificar_potenciometro
+};
+const size_t CANT_SENSORES = sizeof(VERIFICAR_SENSOR) / sizeof(VERIFICAR_SENSOR[0]);
+
+void tarea_eventos(void *parameter) {
+    size_t indice = 0;
+    evento_t ev;
+    while (1) {
+        if (VERIFICAR_SENSOR[indice](ev)) {
+            encolar_evento(ev.tipo, ev.valor_aux);
+        }
+        indice = (indice + 1) % CANT_SENSORES;
+        vTaskDelay(pdMS_TO_TICKS(TMP_EVENTOS_MILI));
+    }
+}
+
+// ============================================================================
+// ACTUADORES
+// ============================================================================
+void enviar_a_lcd(const char *l1, const char *l2, int cuenta_regresiva = 0) {
+    msg_lcd_t msg;
+    memset(&msg, 0, sizeof(msg));
+    if (l1) strncpy(msg.linea1, l1, LCD_COLUMNAS);
+    if (l2) strncpy(msg.linea2, l2, LCD_COLUMNAS);
+    msg.cuenta_regresiva = cuenta_regresiva;
+    xQueueSend(cola_lcd, &msg, SIN_ESPERA);
+}
+
+void act_lcd_menu_principal(int vidas_restantes) {
+    char buf[TAM_BUFFER_TEXTO];
+    snprintf(buf, sizeof(buf), "Vidas:%d Use App", vidas_restantes);
+    enviar_a_lcd("ESCAPE ROOM SOA", buf);
+}
+
+void act_lcd_reseteando() {
+    enviar_a_lcd("SISTEMA ESCAPE", "Reseteando...");
+}
+
+void act_lcd_d1_intro() {
+    enviar_a_lcd("D1: Ritmo Led", "Siga aplausos!");
+}
+
+void act_lcd_d2_intro() {
+    char buf[TAM_BUFFER_TEXTO];
+    snprintf(buf, sizeof(buf), "D2:R=%d I=%dmA", R_OHM_VALOR, I_CORRIENTE_MA);
+    enviar_a_lcd(buf, "V=2.00V (+-0.15)");
+}
+
+void act_lcd_d3_intro() {
+    enviar_a_lcd("D3: App Android", "Esperando cod..");
+}
+
+void act_lcd_resultado(bool exito, const char *msg) {
+    enviar_a_lcd(exito ? "** ACIERTO **" : "* ERROR/TIMEOUT *", msg);
+}
+
+void act_lcd_penalizacion(int segs_restantes) {
+    char buf[TAM_BUFFER_TEXTO];
+    snprintf(buf, sizeof(buf), "Espera: %ds", segs_restantes);
+    enviar_a_lcd("!PENALIZACION!", buf, segs_restantes);
+}
+
+void act_lcd_victoria() {
+    enviar_a_lcd("!CAJA ABIERTA!", "VICTORIA TOTAL!");
+}
+
+void act_led_desafio_completado(int num_desafio, bool encender) {
+    if (num_desafio >= 1 && num_desafio <= TOTAL_DESAFIOS) {
+        digitalWrite(PINES_LED_PROG[num_desafio], encender ? HIGH : LOW);
+    }
+}
+
+void act_led_amarillo_apagar() {
+    cmd_led_amarillo_t cmd = { LED_CMD_APAGAR, 0 };
+    xQueueSend(cola_led, &cmd, SIN_ESPERA);
+}
+
+void act_led_amarillo_progreso(int actual, int total) {
+    cmd_led_amarillo_t cmd = { LED_CMD_FIJO, 0 };
+    if (actual < total) {
+        cmd.modo = LED_CMD_RITMO;
+        cmd.semiperiodo_ms = SEMIPERIODO_MAX_MS - (SEMIPERIODO_MAX_MS - SEMIPERIODO_MIN_MS) * actual / total;
+    }
+    xQueueSend(cola_led, &cmd, SIN_ESPERA);
+}
+
+void act_servo_abrir() {
+    servo_traba.write(SERVO_ANGULO_ABIERTO);
+}
+
+void act_servo_cerrar() {
+    servo_traba.write(SERVO_ANGULO_CERRADO);
+}
+
+void act_buzzer(tipo_sonido_t s) {
+    xQueueSend(cola_buzzer, &s, SIN_ESPERA);
+}
+
+void act_buzzer_beep()    { act_buzzer(SONIDO_BEEP); }
+void act_buzzer_acierto() { act_buzzer(SONIDO_ACIERTO); }
+void act_buzzer_error()   { act_buzzer(SONIDO_ERROR); }
+
+void inicializar_actuadores() {
+    for (int i = 1; i <= TOTAL_DESAFIOS; i++) {
+        pinMode(PINES_LED_PROG[i], OUTPUT);
+        digitalWrite(PINES_LED_PROG[i], LOW);
+    }
+    pinMode(PIN_LED_AMARILLO, OUTPUT);
+    pinMode(PIN_BUZZER, OUTPUT);
+
+    Wire.begin(PIN_LCD_SDA, PIN_LCD_SCL);
+    lcd.init();
+    lcd.backlight();
+    lcd.clear();
+
+    servo_traba.setPeriodHertz(SERVO_FRECUENCIA_HZ);
+    servo_traba.attach(PIN_SERVO, SERVO_MIN_PULSO_US, SERVO_MAX_PULSO_US);
+    servo_traba.write(SERVO_ANGULO_CERRADO);
+}
+
+void imprimir_linea_lcd(uint8_t fila, const char *texto) {
+    if (fila >= LCD_FILAS) return;
+    char linea[LCD_COLUMNAS + 1];
+    memset(linea, ' ', LCD_COLUMNAS);
+    linea[LCD_COLUMNAS] = '\0';
+    if (texto != nullptr) {
+        size_t len = strlen(texto);
+        if (len > LCD_COLUMNAS) len = LCD_COLUMNAS;
+        memcpy(linea, texto, len);
+    }
+    lcd.setCursor(0, fila);
+    lcd.print(linea);
+}
+
+void tarea_lcd(void *parameter) {
+    msg_lcd_t msg;
+    while (1) {
+        if (xQueueReceive(cola_lcd, &msg, portMAX_DELAY) == pdTRUE) {
+            imprimir_linea_lcd(0, msg.linea1);
+            imprimir_linea_lcd(1, msg.linea2);
+
+            while (msg.cuenta_regresiva > 0) {
+                msg_lcd_t nueva;
+                if (xQueueReceive(cola_lcd, &nueva, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                    msg = nueva;
+                    imprimir_linea_lcd(0, msg.linea1);
+                    imprimir_linea_lcd(1, msg.linea2);
+                } else {
+                    msg.cuenta_regresiva--;
+                    char buf[TAM_BUFFER_TEXTO];
+                    snprintf(buf, sizeof(buf), "Espera: %ds", msg.cuenta_regresiva);
+                    imprimir_linea_lcd(1, buf);
+                }
+            }
+        }
+    }
+}
+
+void tarea_led_ritmo(void *parameter) {
+    cmd_led_amarillo_t cmd = { LED_CMD_APAGAR, 0 };
+    bool encendido = false;
+    while (1) {
+        TickType_t espera = (cmd.modo == LED_CMD_RITMO) ? pdMS_TO_TICKS(cmd.semiperiodo_ms) : portMAX_DELAY;
+        if (xQueueReceive(cola_led, &cmd, espera) == pdTRUE) {
+            encendido = (cmd.modo != LED_CMD_APAGAR);
+        } else {
+            encendido = !encendido;
+        }
+        digitalWrite(PIN_LED_AMARILLO, encendido ? HIGH : LOW);
+    }
+}
+
+void tarea_buzzer(void *parameter) {
+    tipo_sonido_t s;
+    while (1) {
+        if (xQueueReceive(cola_buzzer, &s, portMAX_DELAY) == pdTRUE) {
+            switch (s) {
+                case SONIDO_BEEP:
+                    tone(PIN_BUZZER, FREC_BEEP, DUR_BEEP);
+                    vTaskDelay(pdMS_TO_TICKS(DUR_BEEP + 20));
+                    noTone(PIN_BUZZER);
+                    break;
+                case SONIDO_ACIERTO:
+                    tone(PIN_BUZZER, FREC_ACIERTO1, DUR_ACIERTO1);
+                    vTaskDelay(pdMS_TO_TICKS(DUR_ACIERTO1 + 20));
+                    tone(PIN_BUZZER, FREC_ACIERTO2, DUR_ACIERTO2);
+                    vTaskDelay(pdMS_TO_TICKS(DUR_ACIERTO2 + 20));
+                    noTone(PIN_BUZZER);
+                    break;
+                case SONIDO_ERROR:
+                    tone(PIN_BUZZER, FREC_ERROR, DUR_ERROR);
+                    vTaskDelay(pdMS_TO_TICKS(DUR_ERROR + 20));
+                    noTone(PIN_BUZZER);
+                    break;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// COMUNICACIÓN SERIAL Y MQTT
+// ============================================================================
+void enviar_a_mqtt(const char *topico, const char *payload) {
+    msg_mqtt_tx_t msg;
+    strncpy(msg.topico, topico, sizeof(msg.topico) - 1);
+    msg.topico[sizeof(msg.topico) - 1] = '\0';
+    strncpy(msg.payload, payload, sizeof(msg.payload) - 1);
+    msg.payload[sizeof(msg.payload) - 1] = '\0';
+    xQueueSend(cola_mqtt_tx, &msg, SIN_ESPERA);
+}
+
+void enviar_vidas_mqtt(int vidas_restantes) {
+    char buf_v[TAM_BUFFER_TEXTO];
+    snprintf(buf_v, sizeof(buf_v), "%d", vidas_restantes);
+    enviar_a_mqtt(TOPICO_TX_VIDAS, buf_v);
+}
+
+void enviar_resultado_mqtt(int num_desafio, bool exito) {
+    char buf[TAM_BUFFER_TEXTO];
+    snprintf(buf, sizeof(buf), "%d,%s", num_desafio, exito ? "OK" : "ERROR");
+    enviar_a_mqtt(TOPICO_TX_DESAFIO, buf);
+}
+
+void enviar_tension_mqtt(int milivolts) {
+    char buf[TAM_BUFFER_TEXTO];
+    snprintf(buf, sizeof(buf), "%.2f", milivolts / MILIVOLTS_POR_VOLT);
+    enviar_a_mqtt(TOPICO_TX_POT, buf);
+}
+
+bool encolar_seleccion(const String &texto) {
+    if (texto == "1")      encolar_evento(EVENTO_DESAFIO_1, 0);
+    else if (texto == "2") encolar_evento(EVENTO_DESAFIO_2, 0);
+    else if (texto == "3") encolar_evento(EVENTO_DESAFIO_3, 0);
+    else return false;
+    return true;
+}
+
+bool encolar_codigo_d3(const String &texto) {
+    if (texto.equalsIgnoreCase("OK"))         encolar_evento(EVENTO_D3_CODIGO_OK, 0);
+    else if (texto.equalsIgnoreCase("ERROR")) encolar_evento(EVENTO_D3_CODIGO_ERROR, 0);
+    else return false;
+    return true;
+}
+
+void limpiar_comando(String &linea) {
+    linea.trim();
+    if (linea.endsWith("#")) {
+        linea.remove(linea.length() - 1);
+        linea.trim();
+    }
+}
+
+void tarea_comunicacion(void *parameter) {
+    while (1) {
+        if (Serial.available()) {
+            String linea = Serial.readStringUntil('\n');
+            limpiar_comando(linea);
+            if (linea.length() > 0 && !encolar_seleccion(linea) && !encolar_codigo_d3(linea)) {
+                LOG_DEBUG("[SERIAL] Comando desconocido: %s\n", linea.c_str());
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+void callback_mqtt(char *topic, byte *payload, unsigned int length) {
+    String msg;
+    for (unsigned int i = 0; i < length; i++) {
+        msg += (char)payload[i];
+    }
+    limpiar_comando(msg);
+
+    if (strcmp(topic, TOPICO_SEL_DESAFIO) == 0) {
+        encolar_seleccion(msg);
+    } else if (strcmp(topic, TOPICO_D3_CODIGO) == 0) {
+        encolar_codigo_d3(msg);
+    }
+}
+
+void reconectar_mqtt() {
+    String cid = "ESP32_WOKWI_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+    LOG_DEBUG("[MQTT] Conectando a %s...\n", MQTT_BROKER);
+    if (mqttClient.connect(cid.c_str())) {
+        mqttClient.subscribe(TOPICO_SEL_DESAFIO);
+        mqttClient.subscribe(TOPICO_D3_CODIGO);
+        LOG_DEBUG("[MQTT] Conectado exitosamente!\n");
+        enviar_vidas_mqtt(vidas); // Enviar vidas iniciales a la App Android
+    }
+}
+
+void tarea_mqtt(void *parameter) {
+    LOG_DEBUG("[WiFi] Conectando a %s...\n", WIFI_SSID);
+    WiFi.disconnect(true);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
+
+    int intentos = 0;
+    while (WiFi.status() != WL_CONNECTED) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        Serial.print(".");
+        intentos++;
+        if (intentos > 20) {
+            WiFi.disconnect(true);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+            intentos = 0;
+        }
+    }
+
+    LOG_DEBUG("\n[WiFi] Conectado! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(callback_mqtt);
+
+    while (1) {
+        if (!mqttClient.connected()) {
+            reconectar_mqtt();
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        } else {
+            msg_mqtt_tx_t tx_msg;
+            while (xQueueReceive(cola_mqtt_tx, &tx_msg, SIN_ESPERA) == pdTRUE) {
+                mqttClient.publish(tx_msg.topico, tx_msg.payload);
+            }
+            mqttClient.loop();
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+}
+
+// ============================================================================
+// LÓGICA DE JUEGO Y FSM (DOBLE SWITCH)
+// ============================================================================
+void registrar_acierto_desafio(int num) {
+    if (!desafio_resuelto[num]) {
+        desafio_resuelto[num] = true;
+        total_resueltos++;
+        act_led_desafio_completado(num, true);
+    }
+}
+
+void registrar_fallo_vida() {
+    if (vidas > 0) vidas--;
+}
+
+tipo_evento_t evento_tras_resultado() {
+    if (total_resueltos >= TOTAL_DESAFIOS) return EVENTO_DESAFIOS_COMPLETADOS;
+    if (vidas == 0) return EVENTO_SIN_VIDAS;
+    return EVENTO_CON_VIDAS;
+}
+
+void finalizar_desafio(int num, bool exito, const char *msg) {
+    detener_timeout();
+    enviar_resultado_mqtt(num, exito);
+    if (exito) {
+        registrar_acierto_desafio(num);
+        act_buzzer_acierto();
+    } else {
+        registrar_fallo_vida();
+        enviar_vidas_mqtt(vidas);
+        act_led_amarillo_apagar();
+        act_buzzer_error();
+    }
+    act_lcd_resultado(exito, msg);
+    programar_evento(evento_tras_resultado(), TIEMPO_MOSTRAR_RESULTADO);
+    LOG_DEBUG(">>> Desafio %d: %s. Vidas: %d\n", num, exito ? "SUPERADO" : "FALLADO", vidas);
+}
+
+void iniciar_desafio(unsigned long tiempo_limite) {
+    act_led_amarillo_apagar();
+    act_buzzer_beep();
+    iniciar_timeout(tiempo_limite);
+}
+
+void volver_al_menu() {
+    act_led_amarillo_apagar();
+    act_lcd_menu_principal(vidas);
+    act_buzzer_beep();
+    enviar_vidas_mqtt(vidas);
+}
+
+void iniciar_penalizacion() {
+    programar_evento(EVENTO_TIMEOUT_FIN_PENALIZACION, TIEMPO_PENALIZACION);
+    act_lcd_penalizacion(TIEMPO_PENALIZACION / MS_POR_SEGUNDO);
+    enviar_vidas_mqtt(0);
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "BLOQUEADO");
+}
+
+void restaurar_vidas() {
+    vidas = MAX_VIDAS;
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "NORMAL");
+    volver_al_menu();
+}
+
+void abrir_caja() {
+    act_led_amarillo_apagar();
+    act_lcd_victoria();
+    act_servo_abrir();
+    act_buzzer_acierto();
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "VICTORIA");
+}
+
+void iniciar_reseteo() {
+    act_lcd_reseteando();
+    act_buzzer_beep();
+    programar_evento(EVENTO_FIN_RESET, TIEMPO_RESETEANDO);
+}
+
+void reiniciar_juego() {
+    vidas = MAX_VIDAS;
+    total_resueltos = 0;
+    for (int i = 1; i <= TOTAL_DESAFIOS; i++) {
+        desafio_resuelto[i] = false;
+        act_led_desafio_completado(i, false);
+    }
+    act_servo_cerrar();
+    detener_timers();
+    volver_al_menu();
+}
+
+void fsm(const evento_t &evento) {
+    switch (estado_actual) {
+        case ESTADO_ESPERANDO_DESAFIO:
+            switch (evento.tipo) {
+                case EVENTO_DESAFIO_1:
+                    if (!desafio_resuelto[1]) {
+                        act_lcd_d1_intro();
+                        iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+                        estado_actual = ESTADO_D1_ESPERANDO_APLAUSO;
+                    }
+                    break;
+                case EVENTO_DESAFIO_2:
+                    if (!desafio_resuelto[2]) {
+                        act_lcd_d2_intro();
+                        iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+                        estado_actual = ESTADO_D2_ESPERANDO_CAMBIO_POT;
+                    }
+                    break;
+                case EVENTO_DESAFIO_3:
+                    if (!desafio_resuelto[3]) {
+                        act_lcd_d3_intro();
+                        iniciar_desafio(TIEMPO_LIMITE_D3);
+                        estado_actual = ESTADO_D3_ESPERANDO_CODIGO;
+                    }
+                    break;
+                case EVENTO_BTN_RESET:
+                    iniciar_reseteo();
+                    estado_actual = ESTADO_RESETEANDO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_D1_ESPERANDO_APLAUSO:
+            switch (evento.tipo) {
+                case EVENTO_APLAUSO_DETECTADO:
+                    act_buzzer_beep();
+                    act_led_amarillo_progreso(evento.valor_aux, D1_APLAUSOS_OBJETIVO);
+                    if (evento.valor_aux == D1_PRIMER_APLAUSO) {
+                        iniciar_timeout(TIEMPO_VENTANA_D1);
+                    }
+                    estado_actual = ESTADO_D1_ESPERANDO_APLAUSO;
+                    break;
+                case EVENTO_D1_CANT_APLAUSOS_ALCANZADA:
+                    act_led_amarillo_progreso(D1_APLAUSOS_OBJETIVO, D1_APLAUSOS_OBJETIVO);
+                    finalizar_desafio(1, true, "RITMO LOGRADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_TIMEOUT_DESAFIO:
+                    finalizar_desafio(1, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_D2_ESPERANDO_CAMBIO_POT:
+            switch (evento.tipo) {
+                case EVENTO_VALOR_POT_CAMBIO:
+                    enviar_tension_mqtt(evento.valor_aux);
+                    estado_actual = ESTADO_D2_ESPERANDO_CAMBIO_POT;
+                    break;
+                case EVENTO_D2_VALOR_POT_CORRECTO:
+                    finalizar_desafio(2, true, "VALOR EXACTO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_TIMEOUT_DESAFIO:
+                    finalizar_desafio(2, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_D3_ESPERANDO_CODIGO:
+            switch (evento.tipo) {
+                case EVENTO_D3_CODIGO_OK:
+                    finalizar_desafio(3, true, "JUEGO SUPERADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_D3_CODIGO_ERROR:
+                    finalizar_desafio(3, false, "CODIGO ERRONEO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_TIMEOUT_DESAFIO:
+                    finalizar_desafio(3, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_DESAFIO_FINALIZADO:
+            switch (evento.tipo) {
+                case EVENTO_CON_VIDAS:
+                    volver_al_menu();
+                    estado_actual = ESTADO_ESPERANDO_DESAFIO;
+                    break;
+                case EVENTO_SIN_VIDAS:
+                    iniciar_penalizacion();
+                    estado_actual = ESTADO_PENALIZACION_BLOQUEADO;
+                    break;
+                case EVENTO_DESAFIOS_COMPLETADOS:
+                    abrir_caja();
+                    estado_actual = ESTADO_CAJA_DESBLOQUEADA;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_PENALIZACION_BLOQUEADO:
+            switch (evento.tipo) {
+                case EVENTO_TIMEOUT_FIN_PENALIZACION:
+                    restaurar_vidas();
+                    estado_actual = ESTADO_ESPERANDO_DESAFIO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_CAJA_DESBLOQUEADA:
+            switch (evento.tipo) {
+                case EVENTO_BTN_RESET:
+                    iniciar_reseteo();
+                    estado_actual = ESTADO_RESETEANDO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        case ESTADO_RESETEANDO:
+            switch (evento.tipo) {
+                case EVENTO_FIN_RESET:
+                    reiniciar_juego();
+                    estado_actual = ESTADO_ESPERANDO_DESAFIO;
+                    break;
+                default:
+                    break;
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+void tarea_fsm(void *parameter) {
+    evento_t evento;
+    while (1) {
+        if (xQueueReceive(cola_eventos, &evento, portMAX_DELAY) != pdTRUE ||
+            estado_actual >= CANT_ESTADOS || evento.tipo >= CANT_EVENTOS) {
+            continue;
+        }
+        estado_fsm_t anterior = estado_actual;
+        if (evento.tipo != EVENTO_VALOR_POT_CAMBIO) {
+            LOG_DEBUG("[FSM] Estado: %s | Evento: %s\n", NOMBRE_ESTADO[estado_actual], NOMBRE_EVENTO[evento.tipo]);
+        }
+        fsm(evento);
+        if (estado_actual != anterior) {
+            LOG_DEBUG("[FSM] Transicion: %s -> %s\n", NOMBRE_ESTADO[anterior], NOMBRE_ESTADO[estado_actual]);
+        }
+    }
+}
+
+// ============================================================================
+// INICIALIZACIÓN (START, SETUP Y LOOP)
+// ============================================================================
+void start() {
+    Serial.begin(115200);
+    Serial.setTimeout(50);
+    mutex_serial = xSemaphoreCreateMutex();
+    LOG_DEBUG("\n=== INICIANDO SISTEMA ESCAPE ROOM (WOKWI) ===\n");
+
+    cola_eventos = xQueueCreate(10, sizeof(evento_t));
+    cola_buzzer  = xQueueCreate(5,  sizeof(tipo_sonido_t));
+    cola_lcd     = xQueueCreate(8,  sizeof(msg_lcd_t));
+    cola_led     = xQueueCreate(4,  sizeof(cmd_led_amarillo_t));
+    cola_mqtt_tx = xQueueCreate(10, sizeof(msg_mqtt_tx_t));
+
+    crear_timers();
+    inicializar_sensores();
+    inicializar_actuadores();
+
+    estado_actual = ESTADO_ESPERANDO_DESAFIO;
+    reiniciar_juego();
+
+    xTaskCreate(tarea_fsm,          "Task_FSM",     TAM_PILA_FSM,     NULL, PRIORIDAD_FSM,     NULL);
+    xTaskCreate(tarea_eventos,      "Task_Eventos", TAM_PILA_EVENTOS, NULL, PRIORIDAD_EVENTOS, NULL);
+    xTaskCreate(tarea_led_ritmo,    "Task_LED",     TAM_PILA_LED,     NULL, PRIORIDAD_LED,     NULL);
+    xTaskCreate(tarea_buzzer,       "Task_Buzzer",  TAM_PILA_BUZZER,  NULL, PRIORIDAD_BUZZER,  NULL);
+    xTaskCreate(tarea_lcd,          "Task_LCD",     TAM_PILA_LCD,     NULL, PRIORIDAD_LCD,     NULL);
+    xTaskCreate(tarea_comunicacion, "Task_Com",     TAM_PILA_COM,     NULL, PRIORIDAD_COM,     NULL);
+    xTaskCreate(tarea_mqtt,         "Task_MQTT",    TAM_PILA_MQTT,    NULL, PRIORIDAD_MQTT,    NULL);
+}
+
+void setup() {
+    start();
+}
+
+void loop() {
+    // La FSM corre como tarea de FreeRTOS. Se elimina loop() para que no consuma CPU.
+    vTaskDelete(NULL);
+}

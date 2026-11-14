@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ink"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp">
+
+        <ImageView
+            android:id="@+id/statusIcon"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_lock_closed" />
+
+        <TextView
+            android:id="@+id/statusTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:fontFamily="sans-serif-black"
+            android:gravity="center"
+            android:text="SISTEMA BLOQUEADO"
+            android:textColor="@color/result_lose"
+            android:textSize="32sp" />
+
+        <TextView
+            android:id="@+id/statusSubtitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:lineSpacingMultiplier="1.2"
+            android:text="Se han agotado las vidas. El sistema se encuentra en penalización."
+            android:textColor="@color/text_primary"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/statusHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/bg_panel"
+            android:gravity="center"
+            android:lineSpacingMultiplier="1.2"
+            android:padding="20dp"
+            android:text="Espera a que el ESP32 termine la penalización (60 segundos) o pulsa el botón de reset en el dispositivo."
+            android:textColor="@color/text_muted"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/btnStatusAction"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_marginTop="36dp"
+            android:background="@drawable/bg_button_outline"
+            android:fontFamily="sans-serif-medium"
+            android:text="Volver al menú"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp" />
+
+    </LinearLayout>
+</ScrollView>
+
