@@ -11,11 +11,7 @@
 #include "tipos.h"
 
 // ============================================================================
-// TEMPORIZADORES (software timers de FreeRTOS, reemplazan a millis())
-//  - timer_timeout: tiempo límite de los desafíos -> EVENTO_TIMEOUT_DESAFIO
-//  - timer_estado:  estados que salen solos (resultado, penalización, reset).
-//    Al programarlo se le guarda en su ID el evento que tiene que encolar.
-// Los callbacks corren en la tarea de timers de FreeRTOS: sólo encolan.
+// TEMPORIZADORES FREERTOS
 // ============================================================================
 TimerHandle_t timer_timeout = NULL;
 TimerHandle_t timer_estado  = NULL;
@@ -59,16 +55,20 @@ void detener_timers() {
 // evento. Las variables de cada sensor son "estado del sensor", no del juego.
 // ============================================================================
 int aplausos_contados = 0;
+int d1_objetivo_sensor = D1_APLAUSOS_MIN;
 unsigned long t_primer_aplauso = 0;
 unsigned long t_ultimo_aplauso = 0;
 bool mic_armado = true;
 
 int adc_pot_ultimo = 0;
+int d2_objetivo_mv_sensor = V_OBJETIVO_DEFECTO_MV;
 unsigned long t_ultimo_mov_pot = 0;
 bool pot_empezo_a_mover = false;
 
 int btn_reset_anterior = HIGH;
 unsigned long t_ultimo_cambio_btn = 0;
+
+SemaphoreHandle_t mutex_sensores = NULL;
 
 // Tiempo actual según el reloj de FreeRTOS.
 unsigned long ahora_ms() {
@@ -80,11 +80,28 @@ int adc_a_milivolts(int lectura_adc) {
 }
 
 void inicializar_sensores() {
+    mutex_sensores = xSemaphoreCreateMutex();
     pinMode(PIN_POT_MIC, INPUT);
     pinMode(PIN_POT_OHM, INPUT);
     pinMode(PIN_BTN_RESET, INPUT_PULLUP);
     adc_pot_ultimo = analogRead(PIN_POT_OHM);
     btn_reset_anterior = digitalRead(PIN_BTN_RESET);
+}
+
+void reiniciar_detector_d1(int objetivo_aplausos) {
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
+    aplausos_contados = 0;
+    t_primer_aplauso = 0;
+    d1_objetivo_sensor = objetivo_aplausos;
+    xSemaphoreGive(mutex_sensores);
+}
+
+void reiniciar_detector_d2(int objetivo_mv) {
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
+    pot_empezo_a_mover = false;
+    t_ultimo_mov_pot = 0;
+    d2_objetivo_mv_sensor = objetivo_mv;
+    xSemaphoreGive(mutex_sensores);
 }
 
 // Pulsador: un evento por pulsación (flanco a LOW), con antirrebote.
@@ -100,32 +117,32 @@ bool verificar_boton_reset(evento_t &ev) {
     return btn_lectura == LOW;
 }
 
-// Micrófono: un aplauso es un pico sobre UMBRAL_SONIDO_ALTO; para contar otro
-// el sonido tiene que bajar de UMBRAL_SONIDO_BAJO. Cuenta los aplausos de la
-// ventana de 5 s: el tercero genera D1_CANT_APLAUSOS_ALCANZADA.
+// Detecta picos sobre UMBRAL_SONIDO_ALTO con histéresis en UMBRAL_SONIDO_BAJO.
 bool verificar_microfono(evento_t &ev) {
     int adc_mic = analogRead(PIN_POT_MIC);
     unsigned long ahora = ahora_ms();
+    bool hay_evento = false;
+
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
     if (!mic_armado) {
         mic_armado = (adc_mic < UMBRAL_SONIDO_BAJO);
-        return false;
+    } else if (adc_mic > UMBRAL_SONIDO_ALTO && ahora - t_ultimo_aplauso > DEBOUNCE_APLAUSO_MS) {
+        mic_armado = false;
+        t_ultimo_aplauso = ahora;
+        if (aplausos_contados == 0 || ahora - t_primer_aplauso > TIEMPO_VENTANA_D1) {
+            aplausos_contados = 0;              // Empieza una ventana nueva
+            t_primer_aplauso = ahora;
+        }
+        aplausos_contados++;
+        bool alcanzado = (aplausos_contados >= d1_objetivo_sensor);
+        ev = { alcanzado ? EVENTO_D1_CANT_APLAUSOS_ALCANZADA : EVENTO_APLAUSO_DETECTADO, aplausos_contados };
+        if (alcanzado) {
+            aplausos_contados = 0;
+        }
+        hay_evento = true;
     }
-    if (adc_mic <= UMBRAL_SONIDO_ALTO || ahora - t_ultimo_aplauso <= DEBOUNCE_APLAUSO_MS) {
-        return false;
-    }
-    mic_armado = false;
-    t_ultimo_aplauso = ahora;
-    if (aplausos_contados == 0 || ahora - t_primer_aplauso > TIEMPO_VENTANA_D1) {
-        aplausos_contados = 0;                  // Empieza una ventana nueva
-        t_primer_aplauso = ahora;
-    }
-    aplausos_contados++;
-    bool alcanzado = (aplausos_contados >= D1_APLAUSOS_OBJETIVO);
-    ev = { alcanzado ? EVENTO_D1_CANT_APLAUSOS_ALCANZADA : EVENTO_APLAUSO_DETECTADO, aplausos_contados };
-    if (alcanzado) {
-        aplausos_contados = 0;
-    }
-    return true;
+    xSemaphoreGive(mutex_sensores);
+    return hay_evento;
 }
 
 // Potenciómetro: VALOR_POT_CAMBIO cada vez que se mueve, y
@@ -133,20 +150,23 @@ bool verificar_microfono(evento_t &ev) {
 bool verificar_potenciometro(evento_t &ev) {
     int adc_pot = analogRead(PIN_POT_OHM);
     unsigned long ahora = ahora_ms();
+    bool hay_evento = false;
+
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
     if (abs(adc_pot - adc_pot_ultimo) > UMBRAL_RUIDO_ADC) {
         adc_pot_ultimo = adc_pot;
         t_ultimo_mov_pot = ahora;
         pot_empezo_a_mover = true;
         ev = { EVENTO_VALOR_POT_CAMBIO, adc_a_milivolts(adc_pot) };
-        return true;
+        hay_evento = true;
+    } else if (pot_empezo_a_mover && ahora - t_ultimo_mov_pot >= TIEMPO_INACTIVIDAD_D2) {
+        pot_empezo_a_mover = false;
+        int milivolts = adc_a_milivolts(adc_pot_ultimo);
+        ev = { EVENTO_D2_VALOR_POT_CORRECTO, milivolts };
+        hay_evento = abs(milivolts - d2_objetivo_mv_sensor) <= TOLERANCIA_MV;
     }
-    if (!pot_empezo_a_mover || ahora - t_ultimo_mov_pot < TIEMPO_INACTIVIDAD_D2) {
-        return false;
-    }
-    pot_empezo_a_mover = false;
-    int milivolts = adc_a_milivolts(adc_pot_ultimo);
-    ev = { EVENTO_D2_VALOR_POT_CORRECTO, milivolts };
-    return abs(milivolts - V_OBJETIVO_MV) <= TOLERANCIA_MV;
+    xSemaphoreGive(mutex_sensores);
+    return hay_evento;
 }
 
 // ============================================================================
@@ -168,7 +188,7 @@ void tarea_eventos(void *parameter) {
     evento_t ev;
     while (1) {
         if (verificar_sensor[indice](ev)) {
-            xQueueSend(cola_eventos, &ev, SIN_ESPERA);
+            encolar_evento(ev.tipo, ev.valor_aux);
         }
         indice = (indice + 1) % CANT_SENSORES;
         vTaskDelay(pdMS_TO_TICKS(TMP_EVENTOS_MILI));

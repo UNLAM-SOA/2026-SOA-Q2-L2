@@ -47,10 +47,8 @@ void enviar_a_lcd(const char *l1, const char *l2, int cuenta_regresiva = 0) {
     xQueueSend(cola_lcd, &msg, SIN_ESPERA);
 }
 
-void act_lcd_menu_principal(int vidas) {
-    char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "Vidas:%d Use App", vidas);
-    enviar_a_lcd("ESCAPE ROOM SOA", buf);
+void act_lcd_menu_principal() {
+    enviar_a_lcd("ESCAPE ROOM SOA", "Use App Android");
 }
 
 void act_lcd_reseteando() {
@@ -61,14 +59,14 @@ void act_lcd_d1_intro() {
     enviar_a_lcd("La clave no se", "lee, se escucha.");
 }
 
-void act_lcd_d2_intro() {
+void act_lcd_d2_intro(int r_ohm, int i_ma) {
     char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "D2:R=%d I=%dmA", R_OHM_VALOR, I_CORRIENTE_MA);
+    snprintf(buf, sizeof(buf), "D2:R=%d I=%dmA", r_ohm, i_ma);
     enviar_a_lcd(buf, "V=...");
 }
 
 void act_lcd_d3_intro() {
-    enviar_a_lcd("D3: App Android", "Esperando cod..");
+    enviar_a_lcd("D3: App Android", "Esperando App..");
 }
 
 void act_lcd_resultado(bool exito, const char *msg) {

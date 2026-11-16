@@ -17,9 +17,10 @@
 // VARIABLES DEL JUEGO (sólo las usa tarea_fsm)
 // ============================================================================
 estado_fsm_t estado_actual;
-int vidas = MAX_VIDAS;
+volatile int vidas = MAX_VIDAS;
 bool desafio_resuelto[TOTAL_DESAFIOS + 1];      // Índices 1..3
 int total_resueltos = 0;
+int d1_objetivo_actual = D1_APLAUSOS_MIN;
 
 // Nombres para los logs, en el mismo orden que los enum (tipos.h)
 const char *const NOMBRE_ESTADO[CANT_ESTADOS] = {
@@ -31,7 +32,7 @@ const char *const NOMBRE_EVENTO[CANT_EVENTOS] = {
     "CONTINUE", "DESAFIO_1", "DESAFIO_2", "DESAFIO_3", "APLAUSO_DETECTADO",
     "D1_CANT_APLAUSOS_ALCANZADA", "VALOR_POT_CAMBIO", "D2_VALOR_POT_CORRECTO",
     "D3_CODIGO_OK", "D3_CODIGO_ERROR", "TIMEOUT_DESAFIO", "CON_VIDAS", "SIN_VIDAS",
-    "DESAFIOS_COMPLETADOS", "TIMEOUT_FIN_PENALIZACION", "BTN_RESET", "FIN_RESET"
+    "DESAFIOS_COMPLETADOS", "TIMEOUT_FIN_PENALIZACION", "BTN_RESET", "FIN_RESET", "ABANDONAR"
 };
 
 // ============================================================================
@@ -56,21 +57,24 @@ tipo_evento_t evento_tras_resultado() {
     return EVENTO_CON_VIDAS;
 }
 
-void finalizar_desafio(int num, bool exito, const char *msg) {
+void finalizar_desafio(int num, bool exito, const char *msg, const char *estado_mqtt = nullptr) {
     detener_timeout();
-    enviar_resultado_mqtt(num, exito);
+    if (estado_mqtt != nullptr) {
+        enviar_estado_desafio_mqtt(num, estado_mqtt);
+    } else {
+        enviar_resultado_mqtt(num, exito);
+    }
     if (exito) {
         registrar_acierto_desafio(num);
         act_buzzer_acierto();
     } else {
         registrar_fallo_vida();
-        enviar_vidas_mqtt(vidas);
         act_led_amarillo_apagar();
         act_buzzer_error();
     }
     act_lcd_resultado(exito, msg);
     programar_evento(evento_tras_resultado(), TIEMPO_MOSTRAR_RESULTADO);
-    LOG_DEBUG(">>> Desafio %d: %s. Vidas: %d\n", num, exito ? "SUPERADO" : "FALLADO", vidas);
+    LOG_DEBUG(">>> Desafio %d: %s. Vidas: %d\n", num, estado_mqtt ? estado_mqtt : (exito ? "SUPERADO" : "FALLADO"), vidas);
 }
 
 // Al entrar a un desafío: consigna en pantalla y arranca su tiempo límite.
@@ -80,14 +84,27 @@ void iniciar_desafio(unsigned long tiempo_limite) {
     iniciar_timeout(tiempo_limite);
 }
 
+int sortear_rango(int minimo, int maximo) {
+    return minimo + (int)(esp_random() % (uint32_t)(maximo - minimo + 1));
+}
+
 void iniciar_d1() {
+    d1_objetivo_actual = sortear_rango(D1_APLAUSOS_MIN, D1_APLAUSOS_MAX);
+    reiniciar_detector_d1(d1_objetivo_actual);
     act_lcd_d1_intro();
     iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+    LOG_DEBUG("[D1] Objetivo sorteado: %d aplausos\n", d1_objetivo_actual);
 }
 
 void iniciar_d2() {
-    act_lcd_d2_intro();
+    int v_base_mv = sortear_rango(V_DECIMAS_MIN_D2, V_DECIMAS_MAX_D2) * MV_POR_DECIMA_VOLT;
+    int r_ohm = RESISTENCIAS_D2[sortear_rango(0, CANT_RESISTENCIAS_D2 - 1)];
+    int i_ma = (v_base_mv + r_ohm / 2) / r_ohm;
+    int v_obj_mv = i_ma * r_ohm;
+    reiniciar_detector_d2(v_obj_mv);
+    act_lcd_d2_intro(r_ohm, i_ma);
     iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+    LOG_DEBUG("[D2] Consigna: R=%d Ohm, I=%d mA -> V_obj=%.2f V\n", r_ohm, i_ma, v_obj_mv / MILIVOLTS_POR_VOLT);
 }
 
 void iniciar_d3() {
@@ -98,7 +115,7 @@ void iniciar_d3() {
 // El primer aplauso abre la ventana de 5 s para completar el ritmo.
 void contar_aplauso(int numero_aplauso) {
     act_buzzer_beep();
-    act_led_amarillo_progreso(numero_aplauso, D1_APLAUSOS_OBJETIVO);
+    act_led_amarillo_progreso(numero_aplauso, d1_objetivo_actual);
     if (numero_aplauso == D1_PRIMER_APLAUSO) {
         iniciar_timeout(TIEMPO_VENTANA_D1);
     }
@@ -106,7 +123,7 @@ void contar_aplauso(int numero_aplauso) {
 
 void volver_al_menu() {
     act_led_amarillo_apagar();
-    act_lcd_menu_principal(vidas);
+    act_lcd_menu_principal();
     act_buzzer_beep();
     enviar_vidas_mqtt(vidas);
 }
@@ -135,6 +152,7 @@ void abrir_caja() {
 void iniciar_reseteo() {
     act_lcd_reseteando();
     act_buzzer_beep();
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "RESETEANDO");
     programar_evento(EVENTO_FIN_RESET, TIEMPO_RESETEANDO);
 }
 
@@ -147,6 +165,7 @@ void reiniciar_juego() {
     }
     act_servo_cerrar();
     detener_timers();
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "RESET");
     volver_al_menu();
 }
 
@@ -193,12 +212,16 @@ void fsm(const evento_t &evento) {
                     estado_actual = ESTADO_D1_ESPERANDO_APLAUSO;
                     break;
                 case EVENTO_D1_CANT_APLAUSOS_ALCANZADA:
-                    act_led_amarillo_progreso(D1_APLAUSOS_OBJETIVO, D1_APLAUSOS_OBJETIVO);
+                    act_led_amarillo_progreso(d1_objetivo_actual, d1_objetivo_actual);
                     finalizar_desafio(1, true, "RITMO LOGRADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_TIMEOUT_DESAFIO:
                     finalizar_desafio(1, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(1, false, "ABANDONADO", "ABANDONO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 default:
@@ -220,6 +243,10 @@ void fsm(const evento_t &evento) {
                     finalizar_desafio(2, false, "TIEMPO AGOTADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(2, false, "ABANDONADO", "ABANDONO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
                 default:
                     break;
             }
@@ -232,11 +259,15 @@ void fsm(const evento_t &evento) {
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_D3_CODIGO_ERROR:
-                    finalizar_desafio(3, false, "CODIGO ERRONEO");
+                    finalizar_desafio(3, false, "JUEGO FALLADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_TIMEOUT_DESAFIO:
                     finalizar_desafio(3, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(3, false, "ABANDONADO", "ABANDONO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 default:
@@ -302,9 +333,7 @@ void fsm(const evento_t &evento) {
 }
 
 // ============================================================================
-// tarea_fsm: se bloquea (portMAX_DELAY) hasta que llega un evento, así no
-// gasta CPU mientras no pasa nada. Reemplaza al loop() con delay(10) del
-// original. Antes y después de fsm() escribe los logs de depuración.
+// TAREA FSM
 // ============================================================================
 void tarea_fsm(void *parameter) {
     evento_t evento;

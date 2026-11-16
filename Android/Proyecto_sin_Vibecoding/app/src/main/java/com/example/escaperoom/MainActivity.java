@@ -27,8 +27,10 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
             R.color.challenge_1, R.color.challenge_2, R.color.challenge_3 };
 
     private MqttManager mqttManager;
+    private MqttConnectionDialog mqttDialog;
 
     private View mqttStatusDot;
+    private View resetOverlay;
     private TextView mqttStatusText;
     private ImageView heart1, heart2, heart3;
 
@@ -38,8 +40,10 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
         setContentView(R.layout.activity_main);
 
         mqttManager = MqttManager.getInstance(this);
+        mqttDialog = new MqttConnectionDialog(this, this::showBrokerSettingsDialog);
 
         mqttStatusDot = findViewById(R.id.mqttStatusDot);
+        resetOverlay = findViewById(R.id.resetOverlay);
         mqttStatusText = findViewById(R.id.mqttStatusText);
         heart1 = findViewById(R.id.heart1);
         heart2 = findViewById(R.id.heart2);
@@ -80,9 +84,29 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
     protected void onPause() {
         super.onPause();
         mqttManager.removeListener(this);
+        mqttDialog.dismiss();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (mqttDialog != null) {
+            mqttDialog.dismiss();
+        }
     }
 
     private void openChallenge(int challenge) {
+        if ("RESETEANDO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
+            return;
+        }
+        if (Boolean.TRUE.equals(mqttManager.getDesafioStatus(challenge))) {
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.already_completed_title)
+                    .setMessage(R.string.already_completed_message)
+                    .setPositiveButton(R.string.accept, null)
+                    .show();
+            return;
+        }
         if (mqttManager.getVidas() <= 0 || "BLOQUEADO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
             Toast.makeText(this, "Sistema bloqueado: penalización en curso.", Toast.LENGTH_SHORT).show();
             GameStatusActivity.show(this, GameStatusActivity.MODE_BLOQUEADO);
@@ -99,9 +123,23 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
 
     private void updateAllUi() {
         updateConnectionUi(mqttManager.isConnected());
+        updateMqttDialog();
         updateVidasUi(mqttManager.getVidas());
         for (int i = 1; i <= 3; i++) {
             updateDesafioUi(i, mqttManager.getDesafioStatus(i));
+        }
+        updateResetOverlay("RESETEANDO".equalsIgnoreCase(mqttManager.getCurrentEstado()));
+    }
+
+    private void updateMqttDialog() {
+        if (mqttDialog != null) {
+            mqttDialog.update(mqttManager.isConnected(), mqttManager.hasEverConnected());
+        }
+    }
+
+    private void updateResetOverlay(boolean resetting) {
+        if (resetOverlay != null) {
+            resetOverlay.setVisibility(resetting ? View.VISIBLE : View.GONE);
         }
     }
 
@@ -132,7 +170,7 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
     }
 
     /**
-     * Marca que candados/desafios se resolvieron o fallaron (soa/escape/desafio).
+     * Marca si cada desafio esta pendiente o resuelto (soa/escape/desafio).
      */
     private void updateDesafioUi(int challenge, Boolean success) {
         if (challenge < 1 || challenge > CARD_IDS.length)
@@ -144,24 +182,18 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
         ImageView lockIcon = card.findViewById(R.id.challengeLockIcon);
         TextView statusBadge = card.findViewById(R.id.challengeStatusBadge);
 
-        if (success == null) {
-            // Pendiente / Bloqueado
-            lockIcon.setImageResource(R.drawable.ic_lock_closed);
-            lockIcon.setColorFilter(ContextCompat.getColor(this, R.color.text_muted));
-            statusBadge.setText("PENDIENTE");
-            statusBadge.setTextColor(ContextCompat.getColor(this, R.color.text_muted));
-        } else if (success) {
+        if (Boolean.TRUE.equals(success)) {
             // Resuelto exitosamente
             lockIcon.setImageResource(R.drawable.ic_status_ok);
             lockIcon.setColorFilter(ContextCompat.getColor(this, R.color.result_win));
             statusBadge.setText("RESUELTO");
             statusBadge.setTextColor(ContextCompat.getColor(this, R.color.result_win));
         } else {
-            // Fallado
-            lockIcon.setImageResource(R.drawable.ic_status_error);
-            lockIcon.setColorFilter(ContextCompat.getColor(this, R.color.result_lose));
-            statusBadge.setText("FALLÓ");
-            statusBadge.setTextColor(ContextCompat.getColor(this, R.color.result_lose));
+            // Pendiente (incluye fallo o abandono previos)
+            lockIcon.setImageResource(R.drawable.ic_lock_closed);
+            lockIcon.setColorFilter(ContextCompat.getColor(this, R.color.text_muted));
+            statusBadge.setText("PENDIENTE");
+            statusBadge.setTextColor(ContextCompat.getColor(this, R.color.text_muted));
         }
     }
 
@@ -170,6 +202,7 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
     @Override
     public void onConnectionChanged(boolean connected) {
         updateConnectionUi(connected);
+        updateMqttDialog();
     }
 
     @Override
@@ -181,18 +214,22 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
     }
 
     @Override
-    public void onDesafioUpdated(int challenge, boolean success) {
+    public void onDesafioUpdated(int challenge, Boolean success) {
         updateDesafioUi(challenge, success);
     }
 
     @Override
     public void onEstadoUpdated(String estado) {
-        // Regla 1: soa/escape/estado para activar la pantalla de bloqueo (penalizacion)
-        // o la de victoria
         if ("BLOQUEADO".equalsIgnoreCase(estado)) {
+            updateResetOverlay(false);
             GameStatusActivity.show(this, GameStatusActivity.MODE_BLOQUEADO);
         } else if ("VICTORIA".equalsIgnoreCase(estado)) {
+            updateResetOverlay(false);
             GameStatusActivity.show(this, GameStatusActivity.MODE_VICTORIA);
+        } else if ("RESETEANDO".equalsIgnoreCase(estado)) {
+            updateResetOverlay(true);
+        } else if ("RESET".equalsIgnoreCase(estado) || "NORMAL".equalsIgnoreCase(estado)) {
+            updateAllUi();
         }
     }
 
@@ -246,6 +283,8 @@ public class MainActivity extends AppCompatActivity implements MqttManager.MqttL
         });
 
         builder.setNegativeButton("Cancelar", null);
-        builder.show();
+        AlertDialog dialog = builder.create();
+        dialog.setOnDismissListener(d -> updateMqttDialog());
+        dialog.show();
     }
 }

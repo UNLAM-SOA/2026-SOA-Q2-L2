@@ -1,7 +1,7 @@
 // ============================================================================
-// Sistema de Desafíos Interactivos (Proyecto Escape Room) — SOA, Lunes Grupo 2
+// Escape Room Interactivo — SOA, Lunes Grupo 2
+// Arquitectura FSM + FreeRTOS (productor-consumidor por colas)
 //
-// Patrón de la cátedra (FSM + FreeRTOS, productor-consumidor):
 //   tarea_eventos (sensores) ─┐
 //   tarea_comunicacion (Serial)├─ cola_eventos ─▶ tarea_fsm ─▶ colas ─▶ tarea_lcd
 //   tarea_mqtt (app Android) ─┤                                     ├─▶ tarea_buzzer
@@ -63,8 +63,7 @@ void setup() {
     start();
 }
 
-// Todo lo hacen las tareas de FreeRTOS: la tarea de Arduino que ejecuta
-// loop() se elimina para que no gaste CPU (y no hay delay()).
+// La lógica corre en tareas FreeRTOS; loop() se elimina.
 void loop() {
     vTaskDelete(NULL);
 }

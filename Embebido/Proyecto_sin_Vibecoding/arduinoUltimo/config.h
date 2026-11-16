@@ -47,8 +47,9 @@ const int SERVO_MAX_PULSO_US   = 2400;
 const int MAX_VIDAS      = 3;
 const int TOTAL_DESAFIOS = 3;
 
-// Desafío 1: tres aplausos dentro de una ventana de 5 s
-const int D1_APLAUSOS_OBJETIVO = 3;
+// Desafío 1: cantidad aleatoria de aplausos (3 a 6) dentro de una ventana de 5 s
+const int D1_APLAUSOS_MIN      = 3;
+const int D1_APLAUSOS_MAX      = 6;
 const int D1_PRIMER_APLAUSO    = 1;
 const int UMBRAL_SONIDO_ALTO   = 2000;      // Nivel ADC que cuenta como aplauso
 const int UMBRAL_SONIDO_BAJO   = 1400;      // Nivel ADC para rearmar el detector
@@ -57,11 +58,14 @@ const unsigned long DEBOUNCE_APLAUSO_MS = 200;
 const unsigned long SEMIPERIODO_MAX_MS  = 300; // Parpadeo del LED amarillo (lento)
 const unsigned long SEMIPERIODO_MIN_MS  = 60;  // Parpadeo del LED amarillo (rápido)
 
-// Desafío 2: Ley de Ohm, V = I · R = 100 Ω · 20 mA = 2 V
-const int R_OHM_VALOR          = 100;
-const int I_CORRIENTE_MA       = 20;
-const int V_OBJETIVO_MV        = R_OHM_VALOR * I_CORRIENTE_MA;
-const int TOLERANCIA_MV        = 150;       // ±0,15 V (alineado con la tolerancia de la App Android)
+// Desafío 2: Ley de Ohm (V = I · R), resistencia comercial y tensión objetivo aleatoria (0,5 V a 3,0 V)
+const int RESISTENCIAS_D2[]     = { 22, 33, 47, 50, 68, 100, 120, 150, 220, 330 };
+const int CANT_RESISTENCIAS_D2  = sizeof(RESISTENCIAS_D2) / sizeof(RESISTENCIAS_D2[0]);
+const int V_DECIMAS_MIN_D2      = 5;        // 0,5 V
+const int V_DECIMAS_MAX_D2      = 30;       // 3,0 V
+const int MV_POR_DECIMA_VOLT    = 100;
+const int V_OBJETIVO_DEFECTO_MV = 2000;
+const int TOLERANCIA_MV         = 150;      // ±0,15 V
 const int UMBRAL_RUIDO_ADC     = 40;        // Cambio mínimo para considerar que se movió
 const unsigned long TIEMPO_INACTIVIDAD_D2 = 3000; // Quieto este tiempo = valor elegido
 const int ADC_MAXIMO           = 4095;      // ADC de 12 bits

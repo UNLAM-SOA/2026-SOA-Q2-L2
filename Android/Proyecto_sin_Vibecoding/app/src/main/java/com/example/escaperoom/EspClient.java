@@ -1,14 +1,7 @@
 package com.example.escaperoom;
 
 /**
- * Contrato de comunicación con el ESP32.
- *
- * La app no sabe si por debajo es BLE, Wi-Fi o Bluetooth clásico: para cambiar el transporte
- * basta con crear otra clase que implemente esta interfaz (ver FakeEspClient como ejemplo).
- *
- * Protocolo propuesto (texto simple):
- *   App  -> ESP32 : "START:1" o "START:2"  (arrancar desafío)
- *   ESP32 -> App  : "RESULT:OK" o "RESULT:FAIL"
+ * Contrato de comunicación con el ESP32 para los desafíos interactivos.
  */
 public interface EspClient {
 

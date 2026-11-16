@@ -45,6 +45,7 @@ typedef enum {
     EVENTO_TIMEOUT_FIN_PENALIZACION,
     EVENTO_BTN_RESET,
     EVENTO_FIN_RESET,
+    EVENTO_ABANDONAR,
     CANT_EVENTOS
 } tipo_evento_t;
 
@@ -96,7 +97,7 @@ QueueHandle_t cola_led     = NULL;      // tarea_fsm -> tarea_led_ritmo
 QueueHandle_t cola_mqtt_tx = NULL;      // tarea_fsm -> tarea_mqtt
 
 // Variable global de vidas compartida con comunicacion.h
-extern int vidas;
+extern volatile int vidas;
 
 // Encola un evento para la FSM sin bloquear (lo usan todos los productores).
 void encolar_evento(tipo_evento_t tipo, int valor_aux) {

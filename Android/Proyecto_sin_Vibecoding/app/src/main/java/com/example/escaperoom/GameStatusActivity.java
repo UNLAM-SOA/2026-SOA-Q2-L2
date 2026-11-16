@@ -7,6 +7,7 @@ import android.widget.Button;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
@@ -22,6 +23,7 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
 
     private String currentMode = MODE_BLOQUEADO;
     private MqttManager mqttManager;
+    private MqttConnectionDialog mqttDialog;
 
     private ImageView statusIcon;
     private TextView statusTitle;
@@ -53,14 +55,22 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
 
         mqttManager = MqttManager.getInstance(this);
         mqttManager.addListener(this);
+        mqttDialog = new MqttConnectionDialog(this, null);
 
         updateUi();
 
-        btnStatusAction.setOnClickListener(v -> {
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            startActivity(intent);
-            finish();
+        btnStatusAction.setOnClickListener(v -> volverAlMenu());
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (MODE_BLOQUEADO.equalsIgnoreCase(currentMode) && mqttManager.getVidas() <= 0
+                        && "BLOQUEADO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
+                    return;
+                }
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+            }
         });
     }
 
@@ -76,13 +86,22 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
             if (mqttManager.getVidas() > 0 || !"BLOQUEADO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
                 volverAlMenu();
             }
+        } else if ("RESETEANDO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
+            volverAlMenu();
+            return;
+        }
+        if (mqttDialog != null) {
+            mqttDialog.update(mqttManager.isConnected(), mqttManager.hasEverConnected());
         }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        // Mantener suscrito para recibir eventos incluso si la ventana pierde el foco
+        // Mantiene la suscripcion MQTT activa mientras la ventana no tenga foco
+        if (mqttDialog != null) {
+            mqttDialog.dismiss();
+        }
     }
 
     private void volverAlMenu() {
@@ -133,16 +152,6 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
     }
 
     @Override
-    public void onBackPressed() {
-        if (MODE_BLOQUEADO.equalsIgnoreCase(currentMode) && mqttManager.getVidas() <= 0
-                && "BLOQUEADO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
-            // Impedir salir al menu durante el bloqueo mientras no tenga vidas
-            return;
-        }
-        super.onBackPressed();
-    }
-
-    @Override
     public void onVidasUpdated(int vidas) {
         // Si estabamos bloqueados y el ESP32 restablecio vidas (vidas > 0), finalizamos
         // la penalizacion y volvemos automaticamente al menu principal
@@ -155,6 +164,11 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
 
     @Override
     public void onEstadoUpdated(String estado) {
+        if ("RESETEANDO".equalsIgnoreCase(estado) || "RESET".equalsIgnoreCase(estado)
+                || "NORMAL".equalsIgnoreCase(estado)) {
+            volverAlMenu();
+            return;
+        }
         if (MODE_BLOQUEADO.equalsIgnoreCase(currentMode) && !"BLOQUEADO".equalsIgnoreCase(estado)) {
             btnStatusAction.setVisibility(android.view.View.VISIBLE);
             btnStatusAction.setText("Volver al menú");
@@ -169,8 +183,18 @@ public class GameStatusActivity extends AppCompatActivity implements MqttManager
     }
 
     @Override
+    public void onConnectionChanged(boolean connected) {
+        if (mqttDialog != null) {
+            mqttDialog.update(connected, mqttManager.hasEverConnected());
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (mqttDialog != null) {
+            mqttDialog.dismiss();
+        }
         mqttManager.removeListener(this);
     }
 }

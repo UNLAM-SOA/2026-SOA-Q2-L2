@@ -1,13 +1,5 @@
 // ============================================================================
-// comunicacion.h — Monitor serie (simula la app en Wokwi) y MQTT con la app.
-// Lo que llega NO ejecuta acciones: se traduce a un evento y se encola para
-// la FSM. Lo que la FSM quiere publicar lo deja en cola_mqtt_tx y lo publica
-// tarea_mqtt, la única que usa el cliente MQTT.
-//
-// Comandos (por Serial o MQTT):
-//   soa/escape/seleccion  "1" | "2" | "3"   -> EVENTO_DESAFIO_1/2/3
-//   soa/escape/d3         "OK" | "ERROR"    -> EVENTO_D3_CODIGO_OK / _ERROR
-// Publica: soa/escape/desafio ("1,OK"), vidas, pot ("1.85"), estado.
+// comunicacion.h — Serial y MQTT (traduce comandos a eventos y publica cola TX)
 // ============================================================================
 #ifndef COMUNICACION_H
 #define COMUNICACION_H
@@ -24,16 +16,17 @@ PubSubClient mqttClient(wifiClient);
 // RECEPCIÓN: texto -> evento
 // ============================================================================
 
-// "1", "2" o "3": elegir desafío. Devuelve true si era uno de ésos.
+// "1", "2", "3" o "ABANDONAR": elegir o abandonar desafío. Devuelve true si era uno de ésos.
 bool encolar_seleccion(const String &texto) {
     if (texto == "1")      encolar_evento(EVENTO_DESAFIO_1, 0);
     else if (texto == "2") encolar_evento(EVENTO_DESAFIO_2, 0);
     else if (texto == "3") encolar_evento(EVENTO_DESAFIO_3, 0);
+    else if (texto.equalsIgnoreCase("ABANDONAR")) encolar_evento(EVENTO_ABANDONAR, 0);
     else return false;
     return true;
 }
 
-// "OK" o "ERROR": resultado del código del desafío 3 (lo valida la app).
+// Resultado del desafío 3 enviado por la app ("OK" o "ERROR").
 bool encolar_codigo_d3(const String &texto) {
     if (texto.equalsIgnoreCase("OK"))         encolar_evento(EVENTO_D3_CODIGO_OK, 0);
     else if (texto.equalsIgnoreCase("ERROR")) encolar_evento(EVENTO_D3_CODIGO_ERROR, 0);
@@ -63,9 +56,6 @@ void tarea_comunicacion(void *parameter) {
     }
 }
 
-// Lo llama mqttClient.loop() (dentro de tarea_mqtt). Copia el mensaje con
-// su largo: el original copiaba en char[8] sin mirar el largo y un mensaje
-// largo escribía fuera del arreglo.
 void callback_mqtt(char *topic, byte *payload, unsigned int length) {
     String msg;
     for (unsigned int i = 0; i < length; i++) {
@@ -98,10 +88,14 @@ void enviar_vidas_mqtt(int vidas) {
     enviar_a_mqtt(TOPICO_TX_VIDAS, buf_v);
 }
 
-void enviar_resultado_mqtt(int num_desafio, bool exito) {
+void enviar_estado_desafio_mqtt(int num_desafio, const char *estado) {
     char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "%d,%s", num_desafio, exito ? "OK" : "ERROR");
+    snprintf(buf, sizeof(buf), "%d,%s", num_desafio, estado);
     enviar_a_mqtt(TOPICO_TX_DESAFIO, buf);
+}
+
+void enviar_resultado_mqtt(int num_desafio, bool exito) {
+    enviar_estado_desafio_mqtt(num_desafio, exito ? "OK" : "ERROR");
 }
 
 void enviar_tension_mqtt(int milivolts) {

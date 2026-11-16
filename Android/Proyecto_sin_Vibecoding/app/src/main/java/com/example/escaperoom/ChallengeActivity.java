@@ -14,7 +14,9 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.StringRes;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
@@ -47,11 +49,14 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     private int challenge;
     private MqttEspClient esp;
     private MqttManager mqttManager;
+    private MqttConnectionDialog mqttDialog;
+    private AlertDialog abandonDialog;
     private MemoryGame game;
     private ShakeDetector shakeDetector;
     private final Random codeRandom = new Random();
     private String winCode;
     private boolean codeReady; // true cuando hay 4 caracteres escritos y falta sacudir
+    private boolean challengeActive;
 
     private View panelIntro, panelWaiting, panelGame, panelResult;
     private View containerD1Waiting, containerD2Gauge;
@@ -71,6 +76,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
 
         challenge = getIntent().getIntExtra(EXTRA_CHALLENGE, 1);
         mqttManager = MqttManager.getInstance(this);
+        mqttDialog = new MqttConnectionDialog(this, null);
 
         panelIntro = findViewById(R.id.panelIntro);
         panelWaiting = findViewById(R.id.panelWaiting);
@@ -103,7 +109,6 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         stylePrimaryButton((Button) findViewById(R.id.btnStart), color);
         stylePrimaryButton((Button) findViewById(R.id.btnRetry), color);
 
-        // Botones del minijuego de memoria (desafio 3).
         btnProduce = findViewById(R.id.btnProduce);
         btnConsume = findViewById(R.id.btnConsume);
         stylePrimaryButton(btnProduce, ContextCompat.getColor(this, R.color.result_win));
@@ -113,7 +118,6 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         esp = new MqttEspClient(this);
         esp.setListener(this);
 
-        // Detector de sacudidas (acelerometro) para confirmar el codigo.
         shakeDetector = new ShakeDetector(this, this::onShake);
 
         game = new MemoryGame((LinearLayout) findViewById(R.id.heapContainer), new MemoryGame.Callback() {
@@ -132,15 +136,13 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
                 if (won) {
                     revealCode();
                 } else {
-                    // Si falla el minijuego de memoria, avisamos al ESP32 para descontar vida
                     mqttManager.publishD3Error();
                     showResult(false, failMessage(failCode));
                 }
             }
         });
 
-        // Al escribir, solo marcamos si el codigo esta completo; la comparacion
-        // se hace recien cuando el jugador sacude el telefono.
+        // La comparacion del codigo se dispara al detectar una sacudida tras completar 4 caracteres.
         codeInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
             @Override public void onTextChanged(CharSequence s, int st, int b, int c) { }
@@ -150,17 +152,51 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         btnProduce.setOnClickListener(v -> game.produce());
         btnConsume.setOnClickListener(v -> game.consume());
 
-        findViewById(R.id.btnBack).setOnClickListener(v -> finish());
+        findViewById(R.id.btnBack).setOnClickListener(v -> handleBackOrAbandon());
         findViewById(R.id.btnStart).setOnClickListener(v -> startChallenge());
         findViewById(R.id.btnRetry).setOnClickListener(v -> startChallenge());
         findViewById(R.id.btnMenu).setOnClickListener(v -> volverAlMenuPrincipal());
-        findViewById(R.id.btnCancel).setOnClickListener(v -> {
-            esp.cancel();
-            showPanel(panelIntro);
+        findViewById(R.id.btnCancel).setOnClickListener(v -> handleBackOrAbandon());
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                handleBackOrAbandon();
+            }
         });
 
         updateVidasUi(mqttManager.getVidas());
         showPanel(panelIntro);
+    }
+
+    private void handleBackOrAbandon() {
+        if (!challengeActive) {
+            finish();
+            return;
+        }
+        if (abandonDialog != null && abandonDialog.isShowing()) {
+            return;
+        }
+        abandonDialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.abandon_confirm_title)
+                .setMessage(R.string.abandon_confirm_message)
+                .setNegativeButton(R.string.keep_playing, null)
+                .setPositiveButton(R.string.abandon, (dialog, which) -> confirmarAbandono())
+                .create();
+        abandonDialog.show();
+    }
+
+    private void detenerDesafioActivo() {
+        challengeActive = false;
+        game.stop();
+        shakeDetector.stop();
+        esp.cancel();
+    }
+
+    private void confirmarAbandono() {
+        detenerDesafioActivo();
+        mqttManager.publishAbandonar();
+        finish();
     }
 
     private void volverAlMenuPrincipal() {
@@ -171,6 +207,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     }
 
     private void startChallenge() {
+        challengeActive = true;
         if (challenge == MINIGAME_CHALLENGE) {
             // Avisar al ESP32 que arranca D3 para que entre en ESTADO_D3_ESPERANDO_CODIGO
             mqttManager.publishSeleccion(3);
@@ -200,17 +237,33 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
 
     @Override
     public void onPotentiometerUpdated(float voltage) {
-        // Regla 1: soa/escape/pot para actualizar el gauge/grafico del potenciometro en D2
         if (challenge == 2 && potGaugeView != null) {
             potGaugeView.setVoltage(voltage);
         }
     }
 
     @Override
+    public void onDesafioUpdated(int ch, Boolean success) {
+        // Sincroniza timeout del ESP32 en D3 mientras el minijuego sigue abierto en la App
+        if (challenge == MINIGAME_CHALLENGE && ch == MINIGAME_CHALLENGE
+                && challengeActive && Boolean.FALSE.equals(success)) {
+            detenerDesafioActivo();
+            showResult(false, R.string.fail_timeout);
+        }
+    }
+
+    @Override
+    public void onConnectionChanged(boolean connected) {
+        if (mqttDialog != null) {
+            mqttDialog.update(connected, mqttManager.hasEverConnected());
+        }
+    }
+
+    @Override
     public void onVidasUpdated(int vidas) {
-        // Regla 1: soa/escape/vidas para pintar los corazones/vidas restantes
         updateVidasUi(vidas);
         if (vidas <= 0) {
+            detenerDesafioActivo();
             finish();
             GameStatusActivity.show(this, GameStatusActivity.MODE_BLOQUEADO);
         }
@@ -218,11 +271,15 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
 
     @Override
     public void onEstadoUpdated(String estado) {
-        // Regla 1: soa/escape/estado para activar la pantalla de bloqueo o victoria
-        if ("BLOQUEADO".equalsIgnoreCase(estado)) {
+        if ("RESETEANDO".equalsIgnoreCase(estado) || "RESET".equalsIgnoreCase(estado)) {
+            detenerDesafioActivo();
+            volverAlMenuPrincipal();
+        } else if ("BLOQUEADO".equalsIgnoreCase(estado)) {
+            detenerDesafioActivo();
             finish();
             GameStatusActivity.show(this, GameStatusActivity.MODE_BLOQUEADO);
         } else if ("VICTORIA".equalsIgnoreCase(estado)) {
+            detenerDesafioActivo();
             finish();
             GameStatusActivity.show(this, GameStatusActivity.MODE_VICTORIA);
         }
@@ -313,10 +370,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         if (entered.equalsIgnoreCase(winCode)) {
             codeReady = false;
             shakeDetector.stop();
-
-            // Regla 2: Publicar en soa/escape/d3 con "OK" cuando el jugador gane el minijuego de la Activity 2
             mqttManager.publishD3Ok();
-
             showResult(true, getString(R.string.win_memory));
         } else {
             codeError.setVisibility(View.VISIBLE);
@@ -351,6 +405,7 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     }
 
     private void showResult(boolean won, CharSequence message) {
+        challengeActive = false;
         resultTitle.setText(won ? R.string.win_title : R.string.lose_title);
         resultTitle.setTextColor(ContextCompat.getColor(
                 this, won ? R.color.result_win : R.color.result_lose));
@@ -385,12 +440,23 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
         super.onPause();
         mqttManager.removeListener(this);
         shakeDetector.stop();
+        if (mqttDialog != null) {
+            mqttDialog.dismiss();
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         mqttManager.addListener(this);
+        if ("RESETEANDO".equalsIgnoreCase(mqttManager.getCurrentEstado())) {
+            challengeActive = false;
+            volverAlMenuPrincipal();
+            return;
+        }
+        if (mqttDialog != null) {
+            mqttDialog.update(mqttManager.isConnected(), mqttManager.hasEverConnected());
+        }
         updateVidasUi(mqttManager.getVidas());
 
         if (challenge == 2 && potGaugeView != null) {
@@ -406,6 +472,12 @@ public class ChallengeActivity extends AppCompatActivity implements EspClient.Li
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (abandonDialog != null && abandonDialog.isShowing()) {
+            abandonDialog.dismiss();
+        }
+        if (mqttDialog != null) {
+            mqttDialog.dismiss();
+        }
         if (esp != null) {
             esp.cleanup();
         }

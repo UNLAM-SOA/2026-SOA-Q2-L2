@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_panel"
+    android:gravity="center"
+    android:minWidth="240dp"
+    android:orientation="vertical"
+    android:paddingHorizontal="32dp"
+    android:paddingVertical="28dp">
+
+    <ProgressBar
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:indeterminate="true"
+        android:indeterminateTint="@color/piece_amber" />
+
+    <TextView
+        android:id="@+id/mqttLoadingText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:fontFamily="sans-serif-medium"
+        android:gravity="center"
+        android:text="@string/mqtt_connecting"
+        android:textColor="@color/text_primary"
+        android:textSize="17sp" />
+
+    <Button
+        android:id="@+id/btnMqttConfigureBroker"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="16dp"
+        android:background="@drawable/bg_button_outline"
+        android:paddingHorizontal="20dp"
+        android:text="@string/mqtt_configure_broker"
+        android:textAllCaps="false"
+        android:textColor="@color/text_primary"
+        android:textSize="14sp"
+        android:visibility="gone" />
+</LinearLayout>
+

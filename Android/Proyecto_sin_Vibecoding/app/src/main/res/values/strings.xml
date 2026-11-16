@@ -5,11 +5,11 @@
 
     <string name="challenge_1_title">Desafío 1</string>
     <string name="challenge_1_desc">Patrón acústico</string>
-    <string name="challenge_1_intro">Observá el LED amarillo del ESP32, que va a parpadear. Pista: la clave no se ve; se escucha.</string>
+    <string name="challenge_1_intro">La clave no será leída; será escuchada. Prestá atención al dispositivo.</string>
 
     <string name="challenge_2_title">Desafío 2</string>
     <string name="challenge_2_desc">Calibración analógica</string>
-    <string name="challenge_2_intro">Ajustá el potenciómetro en el ESP32 para alcanzar la tensión objetivo utilizando la Ley de Ohm. Dejá el valor quieto 3 segundos para confirmar.</string>
+    <string name="challenge_2_intro">Ajustá el potenciómetro en el ESP32 para alcanzar la tensión objetivo. Dejá el valor quieto 3 segundos para confirmar.</string>
 
     <string name="challenge_3_title">Desafío 3</string>
     <string name="challenge_3_desc">Gestión de memoria</string>
@@ -18,6 +18,7 @@
     <string name="back">Volver</string>
     <string name="start">Comenzar</string>
     <string name="cancel">Cancelar</string>
+    <string name="abandon">Abandonar</string>
     <string name="retry">Reintentar</string>
     <string name="back_to_menu">Volver al menú</string>
 
@@ -52,4 +53,17 @@
     <string name="fail_underflow">¡Subdesbordamiento! Intentaste consumir con la memoria vacía.</string>
     <string name="fail_wrong">Operación incorrecta: no seguiste la solicitud del sistema.</string>
     <string name="fail_timeout">Se acabó el tiempo antes de completar las operaciones.</string>
+    <string name="resetting_message">Reseteando...</string>
+
+    <string name="already_completed_title">Desafío completado</string>
+    <string name="already_completed_message">Ya superaste este desafío. Elegí otro desafío pendiente para continuar.</string>
+    <string name="accept">Aceptar</string>
+
+    <string name="abandon_confirm_title">¿Abandonar desafío?</string>
+    <string name="abandon_confirm_message">Si abandonás ahora, perderás una vida y tendrás que volver a intentarlo.</string>
+    <string name="keep_playing">Seguir aquí</string>
+
+    <string name="mqtt_connecting">Conectando a MQTT...</string>
+    <string name="mqtt_reconnecting">Reconectando a MQTT...</string>
+    <string name="mqtt_configure_broker">Configurar broker</string>
 </resources>

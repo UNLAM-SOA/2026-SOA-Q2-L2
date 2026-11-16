@@ -51,7 +51,7 @@ public class MqttManager {
 
     public interface MqttListener {
         default void onPotentiometerUpdated(float voltage) {}
-        default void onDesafioUpdated(int challenge, boolean success) {}
+        default void onDesafioUpdated(int challenge, Boolean success) {}
         default void onVidasUpdated(int vidas) {}
         default void onEstadoUpdated(String estado) {}
         default void onConnectionChanged(boolean connected) {}
@@ -63,11 +63,13 @@ public class MqttManager {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final List<MqttListener> listeners = new ArrayList<>();
+    private final Runnable retryConnectRunnable = this::connect;
 
     private MqttClient mqttClient;
     private String brokerHost;
     private int brokerPort;
     private boolean isConnecting = false;
+    private volatile boolean hasEverConnected = false;
 
     // Estado en memoria
     private int currentVidas = 3;
@@ -128,6 +130,10 @@ public class MqttManager {
         return mqttClient != null && mqttClient.isConnected();
     }
 
+    public boolean hasEverConnected() {
+        return hasEverConnected;
+    }
+
     /**
      * Actualiza la configuracion del broker y reconecta si cambio.
      */
@@ -150,6 +156,7 @@ public class MqttManager {
 
     public void connect() {
         if (isConnected() || isConnecting) return;
+        mainHandler.removeCallbacks(retryConnectRunnable);
 
         executor.execute(() -> {
             isConnecting = true;
@@ -177,6 +184,8 @@ public class MqttManager {
                     @Override
                     public void connectComplete(boolean reconnect, String serverURI) {
                         Log.i(TAG, "Conectado a MQTT broker: " + serverURI + " (reconnect=" + reconnect + ")");
+                        mainHandler.removeCallbacks(retryConnectRunnable);
+                        hasEverConnected = true;
                         subscribeToTopics();
                         isConnecting = false;
                         notifyConnectionChanged(true);
@@ -206,11 +215,14 @@ public class MqttManager {
                 Log.e(TAG, "Error al conectar con MQTT: " + e.getMessage());
                 isConnecting = false;
                 notifyConnectionChanged(false);
+                mainHandler.removeCallbacks(retryConnectRunnable);
+                mainHandler.postDelayed(retryConnectRunnable, 3000);
             }
         });
     }
 
     private void disconnectAndReconnect() {
+        mainHandler.removeCallbacks(retryConnectRunnable);
         executor.execute(() -> {
             try {
                 if (mqttClient != null && mqttClient.isConnected()) {
@@ -246,13 +258,21 @@ public class MqttManager {
                 notifyPotentiometer(voltage);
 
             } else if (TOPIC_DESAFIO.equals(topic)) {
-                // Formato esperado: "1,OK", "1,ERROR", "2,OK", etc.
+                // Formato esperado: "1,OK", "1,ERROR", "1,ABANDONO", etc.
                 String[] parts = payload.split(",");
                 if (parts.length >= 2) {
                     int ch = Integer.parseInt(parts[0].trim());
-                    boolean success = parts[1].trim().equalsIgnoreCase("OK");
-                    desafioStatus.put(ch, success);
-                    notifyDesafio(ch, success);
+                    String status = parts[1].trim();
+                    if ("ABANDONO".equalsIgnoreCase(status)) {
+                        desafioStatus.remove(ch);
+                        notifyDesafio(ch, null);
+                    } else if ("OK".equalsIgnoreCase(status)) {
+                        desafioStatus.put(ch, true);
+                        notifyDesafio(ch, true);
+                    } else {
+                        desafioStatus.remove(ch);
+                        notifyDesafio(ch, false);
+                    }
                 }
 
             } else if (TOPIC_VIDAS.equals(topic)) {
@@ -266,37 +286,41 @@ public class MqttManager {
                 notifyVidas(vidas);
 
             } else if (TOPIC_ESTADO.equals(topic)) {
-                currentEstado = payload;
-                if ("BLOQUEADO".equalsIgnoreCase(payload)) {
-                    currentVidas = 0;
-                    notifyVidas(0);
+                if ("RESET".equalsIgnoreCase(payload)) {
+                    desafioStatus.clear();
+                    currentVidas = 3;
+                    lastVoltage = 0.0f;
+                    currentEstado = "NORMAL";
+                    notifyVidas(currentVidas);
+                    notifyEstado("RESET");
+                } else {
+                    currentEstado = payload;
+                    if ("BLOQUEADO".equalsIgnoreCase(payload)) {
+                        currentVidas = 0;
+                        notifyVidas(0);
+                    }
+                    notifyEstado(payload);
                 }
-                notifyEstado(payload);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error al procesar mensaje de " + topic + " (" + payload + ")", e);
         }
     }
 
-    // --- Publicaciones requeridas ---
+    // ---- Publicaciones ----
 
-    /**
-     * Publica en soa/escape/seleccion con "1", "2" o "3" al pulsar los botones del menu.
-     */
     public void publishSeleccion(int challengeNumber) {
         publish(TOPIC_SELECCION, String.valueOf(challengeNumber));
     }
 
-    /**
-     * Publica en soa/escape/d3 con "OK" cuando el jugador gana el minijuego de la Activity 2.
-     */
+    public void publishAbandonar() {
+        publish(TOPIC_SELECCION, "ABANDONAR");
+    }
+
     public void publishD3Ok() {
         publish(TOPIC_D3, "OK");
     }
 
-    /**
-     * Publica en soa/escape/d3 con "ERROR" cuando el jugador falla el minijuego de la Activity 2.
-     */
     public void publishD3Error() {
         publish(TOPIC_D3, "ERROR");
     }
@@ -341,7 +365,7 @@ public class MqttManager {
         });
     }
 
-    private void notifyDesafio(int challenge, boolean success) {
+    private void notifyDesafio(int challenge, Boolean success) {
         mainHandler.post(() -> {
             for (MqttListener l : copyListeners()) {
                 l.onDesafioUpdated(challenge, success);

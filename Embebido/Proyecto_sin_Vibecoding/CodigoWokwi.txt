@@ -1,16 +1,5 @@
 // ============================================================================
-// Sistema de Desafíos Interactivos (Escape Room) — Versión Wokwi (sketch.ino)
-//
-// Integra la arquitectura oficial FSM + FreeRTOS (rúbrica de cátedra):
-//  - Timers de software de FreeRTOS (sin millis() para timeouts).
-//  - tarea_fsm en cola_eventos con vTaskDelete(NULL) en loop() (sin delay()).
-//  - Máquina de estados con doble switch y nombres de eventos del diagrama.
-//  - Productor-consumidor desacoplado mediante colas FreeRTOS.
-//  - Integración completa MQTT (broker.hivemq.com:1883) con App Android:
-//      Subscripción: soa/escape/seleccion ("1", "2", "3"), soa/escape/d3 ("OK", "ERROR")
-//      Publicación:  soa/escape/pot (%.2f), soa/escape/desafio (N,OK / N,ERROR),
-//                    soa/escape/vidas (%d), soa/escape/estado (BLOQUEADO / VICTORIA)
-//  - Compatibilidad total con pantalla LiquidCrystal_I2C (0x27) y red Wokwi-GUEST.
+// Escape Room Interactivo — Versión Wokwi (ESP32 + FreeRTOS + MQTT)
 // ============================================================================
 
 #include <Arduino.h>
@@ -28,22 +17,9 @@
 // ============================================================================
 // CONFIGURACIÓN DE PINES
 // ============================================================================
-// Descomenta la siguiente línea si tu circuito de Wokwi tiene el LCD en 25/33 y servo en 32:
-// #define USAR_PINES_WOKWI_LEGACY
-
-#ifdef USAR_PINES_WOKWI_LEGACY
-  const uint8_t PIN_LCD_SDA      = 25;
-  const uint8_t PIN_LCD_SCL      = 33;
-  const uint8_t PIN_SERVO        = 32;
-  const int SERVO_ANGULO_CERRADO = 0;
-  const int SERVO_ANGULO_ABIERTO = 90;
-#else
-  const uint8_t PIN_LCD_SDA      = 21;
-  const uint8_t PIN_LCD_SCL      = 22;
-  const uint8_t PIN_SERVO        = 27;
-  const int SERVO_ANGULO_CERRADO = 15;
-  const int SERVO_ANGULO_ABIERTO = 90;
-#endif
+const uint8_t PIN_LCD_SDA      = 21;
+const uint8_t PIN_LCD_SCL      = 22;
+const uint8_t PIN_SERVO        = 27;
 
 const uint8_t PIN_BUZZER       = 14;
 const uint8_t PIN_POT_MIC      = 34; // ADC1_CH6
@@ -60,6 +36,8 @@ const int LCD_FILAS    = 2;
 const int SERVO_FRECUENCIA_HZ  = 50;
 const int SERVO_MIN_PULSO_US   = 500;
 const int SERVO_MAX_PULSO_US   = 2400;
+const int SERVO_ANGULO_CERRADO = 15;
+const int SERVO_ANGULO_ABIERTO = 90;
 
 // ============================================================================
 // CONSTANTES Y PARÁMETROS DEL JUEGO
@@ -69,8 +47,9 @@ const bool DEBUG_ACTIVO = true;
 const int MAX_VIDAS      = 3;
 const int TOTAL_DESAFIOS = 3;
 
-// Desafío 1: Ritmo acústico
-const int D1_APLAUSOS_OBJETIVO = 3;
+// Desafío 1: Ritmo acústico (entre 3 y 6 aplausos aleatorios)
+const int D1_APLAUSOS_MIN      = 3;
+const int D1_APLAUSOS_MAX      = 6;
 const int D1_PRIMER_APLAUSO    = 1;
 const int UMBRAL_SONIDO_ALTO   = 2000;
 const int UMBRAL_SONIDO_BAJO   = 1400;
@@ -79,11 +58,14 @@ const unsigned long DEBOUNCE_APLAUSO_MS = 200;
 const unsigned long SEMIPERIODO_MAX_MS  = 300;
 const unsigned long SEMIPERIODO_MIN_MS  = 60;
 
-// Desafío 2: Ley de Ohm (100 Ohm * 20 mA = 2.00 V)
-const int R_OHM_VALOR          = 100;
-const int I_CORRIENTE_MA       = 20;
-const int V_OBJETIVO_MV        = R_OHM_VALOR * I_CORRIENTE_MA; // 2000 mV
-const int TOLERANCIA_MV        = 150;                          // +-0.15 V
+// Desafío 2: Ley de Ohm (V = I · R), resistencia comercial y tensión objetivo aleatoria (0.5 V a 3.0 V)
+const int RESISTENCIAS_D2[]     = { 22, 33, 47, 50, 68, 100, 120, 150, 220, 330 };
+const int CANT_RESISTENCIAS_D2  = sizeof(RESISTENCIAS_D2) / sizeof(RESISTENCIAS_D2[0]);
+const int V_DECIMAS_MIN_D2      = 5;        // 0.5 V
+const int V_DECIMAS_MAX_D2      = 30;       // 3.0 V
+const int MV_POR_DECIMA_VOLT    = 100;
+const int V_OBJETIVO_DEFECTO_MV = 2000;
+const int TOLERANCIA_MV         = 150;      // +-0.15 V
 const int UMBRAL_RUIDO_ADC     = 40;
 const unsigned long TIEMPO_INACTIVIDAD_D2 = 3000;
 const int ADC_MAXIMO           = 4095;
@@ -181,6 +163,7 @@ typedef enum {
     EVENTO_TIMEOUT_FIN_PENALIZACION,
     EVENTO_BTN_RESET,
     EVENTO_FIN_RESET,
+    EVENTO_ABANDONAR,
     CANT_EVENTOS
 } tipo_evento_t;
 
@@ -244,9 +227,10 @@ void encolar_evento(tipo_evento_t tipo, int valor_aux) {
 // VARIABLES GLOBALES DEL JUEGO
 // ============================================================================
 estado_fsm_t estado_actual;
-int vidas = MAX_VIDAS;
+volatile int vidas = MAX_VIDAS;
 bool desafio_resuelto[TOTAL_DESAFIOS + 1];
 int total_resueltos = 0;
+int d1_objetivo_actual = D1_APLAUSOS_MIN;
 
 LiquidCrystal_I2C lcd(0x27, LCD_COLUMNAS, LCD_FILAS);
 Servo servo_traba;
@@ -265,11 +249,11 @@ const char *const NOMBRE_EVENTO[CANT_EVENTOS] = {
     "CONTINUE", "DESAFIO_1", "DESAFIO_2", "DESAFIO_3", "APLAUSO_DETECTADO",
     "D1_CANT_APLAUSOS_ALCANZADA", "VALOR_POT_CAMBIO", "D2_VALOR_POT_CORRECTO",
     "D3_CODIGO_OK", "D3_CODIGO_ERROR", "TIMEOUT_DESAFIO", "CON_VIDAS", "SIN_VIDAS",
-    "DESAFIOS_COMPLETADOS", "TIMEOUT_FIN_PENALIZACION", "BTN_RESET", "FIN_RESET"
+    "DESAFIOS_COMPLETADOS", "TIMEOUT_FIN_PENALIZACION", "BTN_RESET", "FIN_RESET", "ABANDONAR"
 };
 
 // ============================================================================
-// TIMERS FREERTOS (REEMPLAZO DE MILLIS)
+// TIMERS FREERTOS
 // ============================================================================
 TimerHandle_t timer_timeout = NULL;
 TimerHandle_t timer_estado  = NULL;
@@ -309,16 +293,20 @@ void detener_timers() {
 // SENSORES (DESACOPLADOS DE LA FSM)
 // ============================================================================
 int aplausos_contados = 0;
+int d1_objetivo_sensor = D1_APLAUSOS_MIN;
 unsigned long t_primer_aplauso = 0;
 unsigned long t_ultimo_aplauso = 0;
 bool mic_armado = true;
 
 int adc_pot_ultimo = 0;
+int d2_objetivo_mv_sensor = V_OBJETIVO_DEFECTO_MV;
 unsigned long t_ultimo_mov_pot = 0;
 bool pot_empezo_a_mover = false;
 
 int btn_reset_anterior = HIGH;
 unsigned long t_ultimo_cambio_btn = 0;
+
+SemaphoreHandle_t mutex_sensores = NULL;
 
 unsigned long ahora_ms() {
     return xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -329,11 +317,28 @@ int adc_a_milivolts(int lectura_adc) {
 }
 
 void inicializar_sensores() {
+    mutex_sensores = xSemaphoreCreateMutex();
     pinMode(PIN_POT_MIC, INPUT);
     pinMode(PIN_POT_OHM, INPUT);
     pinMode(PIN_BTN_RESET, INPUT_PULLUP);
     adc_pot_ultimo = analogRead(PIN_POT_OHM);
     btn_reset_anterior = digitalRead(PIN_BTN_RESET);
+}
+
+void reiniciar_detector_d1(int objetivo_aplausos) {
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
+    aplausos_contados = 0;
+    t_primer_aplauso = 0;
+    d1_objetivo_sensor = objetivo_aplausos;
+    xSemaphoreGive(mutex_sensores);
+}
+
+void reiniciar_detector_d2(int objetivo_mv) {
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
+    pot_empezo_a_mover = false;
+    t_ultimo_mov_pot = 0;
+    d2_objetivo_mv_sensor = objetivo_mv;
+    xSemaphoreGive(mutex_sensores);
 }
 
 bool verificar_boton_reset(evento_t &ev) {
@@ -351,45 +356,50 @@ bool verificar_boton_reset(evento_t &ev) {
 bool verificar_microfono(evento_t &ev) {
     int adc_mic = analogRead(PIN_POT_MIC);
     unsigned long ahora = ahora_ms();
+    bool hay_evento = false;
+
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
     if (!mic_armado) {
         mic_armado = (adc_mic < UMBRAL_SONIDO_BAJO);
-        return false;
+    } else if (adc_mic > UMBRAL_SONIDO_ALTO && ahora - t_ultimo_aplauso > DEBOUNCE_APLAUSO_MS) {
+        mic_armado = false;
+        t_ultimo_aplauso = ahora;
+        if (aplausos_contados == 0 || ahora - t_primer_aplauso > TIEMPO_VENTANA_D1) {
+            aplausos_contados = 0;
+            t_primer_aplauso = ahora;
+        }
+        aplausos_contados++;
+        bool alcanzado = (aplausos_contados >= d1_objetivo_sensor);
+        ev = { alcanzado ? EVENTO_D1_CANT_APLAUSOS_ALCANZADA : EVENTO_APLAUSO_DETECTADO, aplausos_contados };
+        if (alcanzado) {
+            aplausos_contados = 0;
+        }
+        hay_evento = true;
     }
-    if (adc_mic <= UMBRAL_SONIDO_ALTO || ahora - t_ultimo_aplauso <= DEBOUNCE_APLAUSO_MS) {
-        return false;
-    }
-    mic_armado = false;
-    t_ultimo_aplauso = ahora;
-    if (aplausos_contados == 0 || ahora - t_primer_aplauso > TIEMPO_VENTANA_D1) {
-        aplausos_contados = 0;
-        t_primer_aplauso = ahora;
-    }
-    aplausos_contados++;
-    bool alcanzado = (aplausos_contados >= D1_APLAUSOS_OBJETIVO);
-    ev = { alcanzado ? EVENTO_D1_CANT_APLAUSOS_ALCANZADA : EVENTO_APLAUSO_DETECTADO, aplausos_contados };
-    if (alcanzado) {
-        aplausos_contados = 0;
-    }
-    return true;
+    xSemaphoreGive(mutex_sensores);
+    return hay_evento;
 }
 
 bool verificar_potenciometro(evento_t &ev) {
     int adc_pot = analogRead(PIN_POT_OHM);
     unsigned long ahora = ahora_ms();
+    bool hay_evento = false;
+
+    xSemaphoreTake(mutex_sensores, portMAX_DELAY);
     if (abs(adc_pot - adc_pot_ultimo) > UMBRAL_RUIDO_ADC) {
         adc_pot_ultimo = adc_pot;
         t_ultimo_mov_pot = ahora;
         pot_empezo_a_mover = true;
         ev = { EVENTO_VALOR_POT_CAMBIO, adc_a_milivolts(adc_pot) };
-        return true;
+        hay_evento = true;
+    } else if (pot_empezo_a_mover && ahora - t_ultimo_mov_pot >= TIEMPO_INACTIVIDAD_D2) {
+        pot_empezo_a_mover = false;
+        int milivolts = adc_a_milivolts(adc_pot_ultimo);
+        ev = { EVENTO_D2_VALOR_POT_CORRECTO, milivolts };
+        hay_evento = abs(milivolts - d2_objetivo_mv_sensor) <= TOLERANCIA_MV;
     }
-    if (!pot_empezo_a_mover || ahora - t_ultimo_mov_pot < TIEMPO_INACTIVIDAD_D2) {
-        return false;
-    }
-    pot_empezo_a_mover = false;
-    int milivolts = adc_a_milivolts(adc_pot_ultimo);
-    ev = { EVENTO_D2_VALOR_POT_CORRECTO, milivolts };
-    return abs(milivolts - V_OBJETIVO_MV) <= TOLERANCIA_MV;
+    xSemaphoreGive(mutex_sensores);
+    return hay_evento;
 }
 
 typedef bool (*sensor_fn)(evento_t &);
@@ -424,10 +434,8 @@ void enviar_a_lcd(const char *l1, const char *l2, int cuenta_regresiva = 0) {
     xQueueSend(cola_lcd, &msg, SIN_ESPERA);
 }
 
-void act_lcd_menu_principal(int vidas_restantes) {
-    char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "Vidas:%d Use App", vidas_restantes);
-    enviar_a_lcd("ESCAPE ROOM SOA", buf);
+void act_lcd_menu_principal() {
+    enviar_a_lcd("ESCAPE ROOM SOA", "Use App Android");
 }
 
 void act_lcd_reseteando() {
@@ -435,17 +443,17 @@ void act_lcd_reseteando() {
 }
 
 void act_lcd_d1_intro() {
-    enviar_a_lcd("D1: Ritmo Led", "Siga aplausos!");
+    enviar_a_lcd("La clave no se", "lee, se escucha.");
 }
 
-void act_lcd_d2_intro() {
+void act_lcd_d2_intro(int r_ohm, int i_ma) {
     char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "D2:R=%d I=%dmA", R_OHM_VALOR, I_CORRIENTE_MA);
-    enviar_a_lcd(buf, "V=2.00V (+-0.15)");
+    snprintf(buf, sizeof(buf), "D2:R=%d I=%dmA", r_ohm, i_ma);
+    enviar_a_lcd(buf, "V=...");
 }
 
 void act_lcd_d3_intro() {
-    enviar_a_lcd("D3: App Android", "Esperando cod..");
+    enviar_a_lcd("D3: App Android", "Esperando App..");
 }
 
 void act_lcd_resultado(bool exito, const char *msg) {
@@ -613,10 +621,14 @@ void enviar_vidas_mqtt(int vidas_restantes) {
     enviar_a_mqtt(TOPICO_TX_VIDAS, buf_v);
 }
 
-void enviar_resultado_mqtt(int num_desafio, bool exito) {
+void enviar_estado_desafio_mqtt(int num_desafio, const char *estado) {
     char buf[TAM_BUFFER_TEXTO];
-    snprintf(buf, sizeof(buf), "%d,%s", num_desafio, exito ? "OK" : "ERROR");
+    snprintf(buf, sizeof(buf), "%d,%s", num_desafio, estado);
     enviar_a_mqtt(TOPICO_TX_DESAFIO, buf);
+}
+
+void enviar_resultado_mqtt(int num_desafio, bool exito) {
+    enviar_estado_desafio_mqtt(num_desafio, exito ? "OK" : "ERROR");
 }
 
 void enviar_tension_mqtt(int milivolts) {
@@ -629,6 +641,7 @@ bool encolar_seleccion(const String &texto) {
     if (texto == "1")      encolar_evento(EVENTO_DESAFIO_1, 0);
     else if (texto == "2") encolar_evento(EVENTO_DESAFIO_2, 0);
     else if (texto == "3") encolar_evento(EVENTO_DESAFIO_3, 0);
+    else if (texto.equalsIgnoreCase("ABANDONAR")) encolar_evento(EVENTO_ABANDONAR, 0);
     else return false;
     return true;
 }
@@ -696,7 +709,6 @@ void tarea_mqtt(void *parameter) {
     int intentos = 0;
     while (WiFi.status() != WL_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(500));
-        Serial.print(".");
         intentos++;
         if (intentos > 20) {
             WiFi.disconnect(true);
@@ -747,21 +759,24 @@ tipo_evento_t evento_tras_resultado() {
     return EVENTO_CON_VIDAS;
 }
 
-void finalizar_desafio(int num, bool exito, const char *msg) {
+void finalizar_desafio(int num, bool exito, const char *msg, const char *estado_mqtt = nullptr) {
     detener_timeout();
-    enviar_resultado_mqtt(num, exito);
+    if (estado_mqtt != nullptr) {
+        enviar_estado_desafio_mqtt(num, estado_mqtt);
+    } else {
+        enviar_resultado_mqtt(num, exito);
+    }
     if (exito) {
         registrar_acierto_desafio(num);
         act_buzzer_acierto();
     } else {
         registrar_fallo_vida();
-        enviar_vidas_mqtt(vidas);
         act_led_amarillo_apagar();
         act_buzzer_error();
     }
     act_lcd_resultado(exito, msg);
     programar_evento(evento_tras_resultado(), TIEMPO_MOSTRAR_RESULTADO);
-    LOG_DEBUG(">>> Desafio %d: %s. Vidas: %d\n", num, exito ? "SUPERADO" : "FALLADO", vidas);
+    LOG_DEBUG(">>> Desafio %d: %s. Vidas: %d\n", num, estado_mqtt ? estado_mqtt : (exito ? "SUPERADO" : "FALLADO"), vidas);
 }
 
 void iniciar_desafio(unsigned long tiempo_limite) {
@@ -772,7 +787,7 @@ void iniciar_desafio(unsigned long tiempo_limite) {
 
 void volver_al_menu() {
     act_led_amarillo_apagar();
-    act_lcd_menu_principal(vidas);
+    act_lcd_menu_principal();
     act_buzzer_beep();
     enviar_vidas_mqtt(vidas);
 }
@@ -801,6 +816,7 @@ void abrir_caja() {
 void iniciar_reseteo() {
     act_lcd_reseteando();
     act_buzzer_beep();
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "RESETEANDO");
     programar_evento(EVENTO_FIN_RESET, TIEMPO_RESETEANDO);
 }
 
@@ -813,7 +829,12 @@ void reiniciar_juego() {
     }
     act_servo_cerrar();
     detener_timers();
+    enviar_a_mqtt(TOPICO_TX_ESTADO, "RESET");
     volver_al_menu();
+}
+
+int sortear_rango(int minimo, int maximo) {
+    return minimo + (int)(esp_random() % (uint32_t)(maximo - minimo + 1));
 }
 
 void fsm(const evento_t &evento) {
@@ -822,15 +843,24 @@ void fsm(const evento_t &evento) {
             switch (evento.tipo) {
                 case EVENTO_DESAFIO_1:
                     if (!desafio_resuelto[1]) {
+                        d1_objetivo_actual = sortear_rango(D1_APLAUSOS_MIN, D1_APLAUSOS_MAX);
+                        reiniciar_detector_d1(d1_objetivo_actual);
                         act_lcd_d1_intro();
                         iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+                        LOG_DEBUG("[D1] Objetivo sorteado: %d aplausos\n", d1_objetivo_actual);
                         estado_actual = ESTADO_D1_ESPERANDO_APLAUSO;
                     }
                     break;
                 case EVENTO_DESAFIO_2:
                     if (!desafio_resuelto[2]) {
-                        act_lcd_d2_intro();
+                        int v_base_mv = sortear_rango(V_DECIMAS_MIN_D2, V_DECIMAS_MAX_D2) * MV_POR_DECIMA_VOLT;
+                        int r_ohm = RESISTENCIAS_D2[sortear_rango(0, CANT_RESISTENCIAS_D2 - 1)];
+                        int i_ma = (v_base_mv + r_ohm / 2) / r_ohm;
+                        int v_obj_mv = i_ma * r_ohm;
+                        reiniciar_detector_d2(v_obj_mv);
+                        act_lcd_d2_intro(r_ohm, i_ma);
                         iniciar_desafio(TIEMPO_LIMITE_DESAFIO);
+                        LOG_DEBUG("[D2] Consigna: R=%d Ohm, I=%d mA -> V_obj=%.2f V\n", r_ohm, i_ma, v_obj_mv / MILIVOLTS_POR_VOLT);
                         estado_actual = ESTADO_D2_ESPERANDO_CAMBIO_POT;
                     }
                     break;
@@ -854,19 +884,23 @@ void fsm(const evento_t &evento) {
             switch (evento.tipo) {
                 case EVENTO_APLAUSO_DETECTADO:
                     act_buzzer_beep();
-                    act_led_amarillo_progreso(evento.valor_aux, D1_APLAUSOS_OBJETIVO);
+                    act_led_amarillo_progreso(evento.valor_aux, d1_objetivo_actual);
                     if (evento.valor_aux == D1_PRIMER_APLAUSO) {
                         iniciar_timeout(TIEMPO_VENTANA_D1);
                     }
                     estado_actual = ESTADO_D1_ESPERANDO_APLAUSO;
                     break;
                 case EVENTO_D1_CANT_APLAUSOS_ALCANZADA:
-                    act_led_amarillo_progreso(D1_APLAUSOS_OBJETIVO, D1_APLAUSOS_OBJETIVO);
+                    act_led_amarillo_progreso(d1_objetivo_actual, d1_objetivo_actual);
                     finalizar_desafio(1, true, "RITMO LOGRADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_TIMEOUT_DESAFIO:
                     finalizar_desafio(1, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(1, false, "ABANDONADO", "ABANDONO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 default:
@@ -888,6 +922,10 @@ void fsm(const evento_t &evento) {
                     finalizar_desafio(2, false, "TIEMPO AGOTADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(2, false, "ABANDONADO", "ABANDONO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
                 default:
                     break;
             }
@@ -900,11 +938,15 @@ void fsm(const evento_t &evento) {
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_D3_CODIGO_ERROR:
-                    finalizar_desafio(3, false, "CODIGO ERRONEO");
+                    finalizar_desafio(3, false, "JUEGO FALLADO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 case EVENTO_TIMEOUT_DESAFIO:
                     finalizar_desafio(3, false, "TIEMPO AGOTADO");
+                    estado_actual = ESTADO_DESAFIO_FINALIZADO;
+                    break;
+                case EVENTO_ABANDONAR:
+                    finalizar_desafio(3, false, "ABANDONADO", "ABANDONO");
                     estado_actual = ESTADO_DESAFIO_FINALIZADO;
                     break;
                 default:

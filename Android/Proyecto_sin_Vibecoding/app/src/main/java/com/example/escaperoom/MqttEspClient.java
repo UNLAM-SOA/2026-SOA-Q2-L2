@@ -35,10 +35,10 @@ public class MqttEspClient implements EspClient, MqttManager.MqttListener {
     }
 
     @Override
-    public void onDesafioUpdated(int challenge, boolean success) {
+    public void onDesafioUpdated(int challenge, Boolean success) {
         if (waitingChallenge == challenge) {
             waitingChallenge = -1;
-            if (listener != null) {
+            if (success != null && listener != null) {
                 listener.onResult(success);
             }
         }
@@ -46,12 +46,7 @@ public class MqttEspClient implements EspClient, MqttManager.MqttListener {
 
     @Override
     public void onConnectionChanged(boolean connected) {
-        if (!connected && waitingChallenge != -1) {
-            // Se perdio conexion mientras esperaba
-            if (listener != null) {
-                listener.onError();
-            }
-        }
+        // La reconexion se muestra mediante popup sobre la pantalla actual sin abortar la espera.
     }
 
     public void cleanup() {

@@ -4,9 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 /**
- * Simulación del ESP32 para probar la interfaz sin hardware.
- * Responde a los 3 segundos y alterna entre ganar y fallar en cada intento.
- * Reemplazar por la implementación real (BLE / Wi-Fi) cuando esté lista.
+ * Simulación local del ESP32 para pruebas sin hardware.
  */
 public class FakeEspClient implements EspClient {
 
