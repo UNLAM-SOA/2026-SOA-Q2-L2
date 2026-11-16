@@ -20,14 +20,22 @@ public class ShakeDetector implements SensorEventListener {
     }
 
     // Fuerza (en g) a partir de la cual se considera una sacudida. 1g = reposo.
-    private static final float SHAKE_THRESHOLD_G = 1.3f;
+    private static final float SHAKE_THRESHOLD_G = 3.0f;
     // Tiempo minimo entre sacudidas, para no disparar varias de golpe.
     private static final long SHAKE_COOLDOWN_MS = 1000;
+    // Cantidad de picos de fuerza seguidos necesarios para contar como sacudida.
+    private static final int REQUIRED_SHAKES = 3;
+    // Tiempo maximo entre picos, si pasa mas, se reinicia la cuenta.
+    private static final long SHAKE_WINDOW_MS = 800;
+    // Separacion minima entre picos, para no contar el mismo movimiento dos veces.
+    private static final long MIN_PEAK_GAP_MS = 150;
 
     private final SensorManager sensorManager;
     private final Sensor accelerometer;
     private final OnShakeListener listener;
     private long lastShakeTime;
+    private long lastPeakTime;
+    private int shakeCount;
 
     public ShakeDetector(Context context, OnShakeListener listener) {
         this.listener = listener;
@@ -45,6 +53,7 @@ public class ShakeDetector implements SensorEventListener {
     /** Empieza a escuchar el acelerometro. */
     public void start() {
         if (accelerometer != null) {
+            shakeCount = 0;
             sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
         }
     }
@@ -70,9 +79,23 @@ public class ShakeDetector implements SensorEventListener {
             if (now - lastShakeTime < SHAKE_COOLDOWN_MS) {
                 return;
             }
-            lastShakeTime = now;
-            if (listener != null) {
-                listener.onShake();
+            // Ignora picos pegados al anterior (es el mismo movimiento).
+            if (now - lastPeakTime < MIN_PEAK_GAP_MS) {
+                return;
+            }
+            // Si paso mucho desde el ultimo pico, empieza la cuenta de cero.
+            if (now - lastPeakTime > SHAKE_WINDOW_MS) {
+                shakeCount = 0;
+            }
+            lastPeakTime = now;
+            shakeCount++;
+
+            if (shakeCount >= REQUIRED_SHAKES) {
+                shakeCount = 0;
+                lastShakeTime = now;
+                if (listener != null) {
+                    listener.onShake();
+                }
             }
         }
     }
